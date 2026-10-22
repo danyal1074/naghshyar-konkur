@@ -875,17 +875,23 @@ app.post('/api/chat/messages', authRequired, (req, res) => {
 
 // ── Admin ──
 app.get('/api/admin/stats', authRequired, (req, res) => {
-  const counselors = db.prepare('SELECT * FROM users WHERE role = "counselor"').all();
-  const students = db.prepare('SELECT COUNT(*) as c FROM users WHERE role = "student"').get().c;
+  const counselors = db.prepare("SELECT * FROM users WHERE role = 'counselor'").all();
+  const students = db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'student'").get().c;
   const exams = db.prepare('SELECT COUNT(*) as c FROM exams').get().c;
   const activeCounselors = counselors.filter((c) => c.status === 'active').length;
+
+  let monthlyRevenue = 0;
+  for (const c of counselors) {
+    const p = PLANS.find((x) => x.id === c.plan);
+    if (p && p.price) monthlyRevenue += p.price;
+  }
 
   res.json({
     counselors: counselors.length,
     activeCounselors,
     students,
     exams,
-    monthlyRevenue: 0,
+    monthlyRevenue,
     questions: db.prepare('SELECT COUNT(*) as c FROM questions').get().c,
   });
 });
@@ -897,6 +903,7 @@ app.get('/api/admin/counselors', authRequired, (req, res) => {
     const examCount = db.prepare('SELECT COUNT(*) as c FROM exams WHERE created_by = ?').get(c.id).c;
     return {
       ...c,
+      renewAt: c.renew_at,
       studentCount,
       examCount,
     };

@@ -18,7 +18,8 @@ export function AdminHome() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  if (list.error && !list.data) return <ErrorBox error={list.error} onRetry={list.reload} />;
+  const hasError = list.error || stats.error;
+  if (hasError && (!list.data || !stats.data)) return <ErrorBox error={hasError} onRetry={() => { list.reload(); stats.reload(); }} />;
   if (!list.data || !stats.data) return <Loading />;
   const s = stats.data;
   const planName = (id) => plans.data?.find((p) => p.id === id)?.name || '—';
@@ -59,19 +60,21 @@ export function AdminHome() {
         <h2>مشاورها</h2>
         <div className="list flat">
           {list.data.map((c) => {
-            const left = c.renewAt ? daysUntil(c.renewAt) : null;
+            const renewDate = c.renewAt || c.renew_at;
+            const left = renewDate ? daysUntil(renewDate) : null;
+            const st = ST[c.status] || ST.active;
             return (
               <div key={c.id} className="list-row counselor-row">
                 <Avatar user={c} size={42} />
                 <div className="grow">
                   <b>{c.name}</b>
-                  <small className="muted"><span className="ltr-inline">{c.phone}</span> · {faNum(c.studentCount)} دانش‌آموز · {faNum(c.examCount)} آزمون</small>
+                  <small className="muted"><span className="ltr-inline">{c.phone}</span> · {faNum(c.studentCount || 0)} دانش‌آموز · {faNum(c.examCount || 0)} آزمون</small>
                 </div>
                 <select className="select compact" value={c.plan} onChange={(e) => changePlan(c, e.target.value)} aria-label={`پلن ${c.name}`}>
                   {(plans.data || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
-                <div className="score-col"><small>تمدید</small><b className={left !== null && left <= 7 ? 'bad' : ''}>{c.renewAt ? fmtDateISO(c.renewAt) : '—'}</b></div>
-                <Badge tone={ST[c.status].tone}>{ST[c.status].label}</Badge>
+                <div className="score-col"><small>تمدید</small><b className={left !== null && left <= 7 ? 'bad' : ''}>{renewDate ? fmtDateISO(renewDate) : '—'}</b></div>
+                <Badge tone={st.tone}>{st.label}</Badge>
                 <Button variant="ghost" size="sm" onClick={() => toggle(c)}>{c.status === 'active' ? 'تعلیق' : 'فعال‌سازی'}</Button>
               </div>
             );
