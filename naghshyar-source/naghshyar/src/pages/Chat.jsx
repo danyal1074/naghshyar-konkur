@@ -122,7 +122,7 @@ export function Chat() {
   const currentStudent = threads.data?.find((t) => t.student?.id === activeStudentId)?.student;
 
   return (
-    <div className={`chat-layout ${isCounselor && selectedStudentId ? 'has-selected' : ''}`}>
+    <div className={`chat-layout ${isCounselor ? (selectedStudentId ? 'has-selected' : '') : 'student-chat'}`}>
       {/* Sidebar for Counselor */}
       {isCounselor && (
         <aside className="chat-sidebar">

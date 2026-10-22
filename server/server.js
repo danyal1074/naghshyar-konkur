@@ -740,10 +740,11 @@ app.post('/api/practice', authRequired, (req, res) => {
   const { title, topicId, note, image } = req.body;
   const id = uid('p');
   const today = new Date().toISOString().slice(0, 10);
+  const savedImage = saveBase64Image(image, 'practice');
   db.prepare(`
     INSERT INTO practice (id, student_id, title, topic_id, note, image, created_at, status, feedback, score)
     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', null, null)
-  `).run(id, req.user.id, title, topicId, note || '', image, today);
+  `).run(id, req.user.id, title, topicId, note || '', savedImage, today);
 
   // Notify counselor
   if (req.user.counselor_id) {
@@ -921,20 +922,52 @@ app.patch('/api/admin/counselors/:id', authRequired, (req, res) => {
 });
 
 // Serve frontend build directly on port 8000
+import fs from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const staticDir = resolve(__dirname, '../naghshyar-demo-build');
-app.use(express.static(staticDir));
+const uploadsDir = resolve(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+export function saveBase64Image(dataUri, prefix = 'img') {
+  if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:image/')) return dataUri;
+  try {
+    const matches = dataUri.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+    if (!matches) return dataUri;
+    const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
+    const buffer = Buffer.from(matches[2], 'base64');
+    const filename = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}.${ext}`;
+    const filePath = resolve(uploadsDir, filename);
+    fs.writeFileSync(filePath, buffer);
+    return `/uploads/${filename}`;
+  } catch (err) {
+    console.error('Error saving image to disk:', err);
+    return dataUri;
+  }
+}
+
+app.use('/uploads', express.static(uploadsDir, { maxAge: '30d' }));
+app.use(express.static(staticDir, {
+  setHeaders: (res, path) => {
+    if (path.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  }
+}));
 app.use((req, res, next) => {
   if (req.path.includes('/assets/')) {
     const assetSub = req.path.substring(req.path.indexOf('/assets/'));
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     return res.sendFile(resolve(staticDir, '.' + assetSub));
   }
   next();
 });
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
+  if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+  res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(resolve(staticDir, 'index.html'));
 });
 

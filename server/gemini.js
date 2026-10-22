@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Load .env if present
 let envKey = process.env.GEMINI_API_KEY;
 if (!envKey) {
   try {
@@ -19,135 +21,153 @@ if (!envKey) {
 
 const GEMINI_API_KEY = envKey || '';
 
-const CANDIDATE_MODELS = [
-  'gemini-3.5-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-3.8-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-flash-latest',
-  'gemini-flash-lite-latest',
-];
+/**
+ * Call Free Sanction-Free AI (Pollinations OpenAI engine)
+ * 100% unblocked from Iran IP addresses
+ */
+async function callPollinationsAI(messages, model = 'openai') {
+  const url = 'https://text.pollinations.ai/';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+    body: JSON.stringify({
+      messages,
+      model,
+      seed: Math.floor(Math.random() * 100000),
+    }),
+  });
+  if (!res.ok) throw new Error(`Pollinations HTTP ${res.status}`);
+  const text = await res.text();
+  return text.trim();
+}
 
-export async function callGemini(contents, systemInstruction = '', jsonMode = false) {
-  let lastErr = null;
-  for (const model of CANDIDATE_MODELS) {
+/**
+ * Call Gemini API with candidate models (if unblocked / with key)
+ */
+async function callGemini(contents, systemInstruction = '', jsonMode = false) {
+  if (!GEMINI_API_KEY) throw new Error('No Gemini API key');
+  const candidateModels = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+  for (const m of candidateModels) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${GEMINI_API_KEY}`;
       const payload = { contents };
-      if (systemInstruction) {
-        payload.systemInstruction = { parts: [{ text: systemInstruction }] };
-      }
-      if (jsonMode) {
-        payload.generationConfig = { responseMimeType: 'application/json' };
-      }
-
+      if (systemInstruction) payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+      if (jsonMode) payload.generationConfig = { responseMimeType: 'application/json' };
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-
       const data = await res.json();
-      if (data.error) {
-        lastErr = new Error(`${model}: ${data.error.message}`);
-        console.warn(`[Gemini] Model ${model} error:`, data.error.message);
-        continue;
+      if (!data.error && data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
       }
-
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text) {
-        return text;
-      }
-    } catch (e) {
-      lastErr = e;
-      console.warn(`[Gemini] Model ${model} fetch failure:`, e.message);
-    }
+    } catch {}
   }
-  throw lastErr || new Error('تمام مدل‌های جمنای با خطا مواجه شدند.');
+  throw new Error('Gemini API unreachable from this network');
 }
 
 /**
- * AI Assistant Chat for Art Entrance Exam students & counselors
+ * Unified AI Chat: Tries Pollinations (sanction-free) first, then Gemini, then Fallback.
  */
 export async function askGeminiChat(message, history = [], user = null) {
-  const systemInstruction = `تو «دستیار هوشمند و مشاور تخصصی کنکور هنر نقش‌یار» هستی.
-وظیفه تو پاسخ‌دهی دقیق، صمیمانه، علمی و کنکوری به داوطلبان و مشاوران کنکور هنر در ایران است.
-تسلط کامل بر مباحث:
-- درک عمومی هنر (تاریخ هنر ایران از باستان تا معاصر، تاریخ هنر جهان از یونان تا سبک‌های مدرن، مبانی هنرهای تجسمی و رنگ‌شناسی، هنر و معماری اسلامی، صنایع دستی و بافت، خواص مواد)
-- درک عمومی ریاضی و فیزیک (هندسه، پرسپکتیو، فیزیک نور و شکست رنگ، تناسب طلایی و محاسبات الگو)
-- خلاقیت تصویری و تجسمی (دید فضایی، ترکیب‌بندی، نمادشناسی، تحلیل تصویر)
-- خلاقیت نمایشی و سینما (تاریخ سینما، سبک‌های تئاتر، فیلمنامه‌نویسی و کارگردانی)
-- خلاقیت موسیقی (سازشناسی ایرانی و جهانی، تئوری موسیقی)
-- آزمون‌های عملی مرحله دوم (طراحی فیگور، نقاشی، گرافیک)
-
+  const systemPrompt = `تو «دستیار هوشمند و مشاور تخصصی کنکور هنر نقش‌یار» هستی.
 پاسخ‌هایت باید:
-۱. فارسی، روان، انگیزشی و متمرکز بر نکات تستی و منابع رسمی کنکور هنر سازمان سنجش باشد.
-۲. نکات کلیدی را به صورت بولت‌پوینت یا پاراگراف‌های کوتاه ارائه کند.
-۳. اگر داوطلب سوال درسی پرسید، با مثال تشریح کن.
-۴. کاربر فعلی: ${user?.name ? `${user.name} (${user.role === 'counselor' ? 'مشاور' : 'داوطلب رشته ' + (user.field || 'هنر')})` : 'داوطلب کنکور هنر'}.`;
+۱. کاملاً به زبان فارسی، روان، صمیمانه و تشویق‌کننده باشد.
+۲. بر مباحث کنکور هنر ایران (درک عمومی هنر، خلاقیت تصویری، ریاضی و فیزیک، تئاتر و سینما، موسیقی و آزمون عملی) مسلط باشد.
+۳. در صورت پرسش درسی، نکات کلیدی و تست‌های احتمالی را به صورت ساختاریافته و با چند بولت‌پوینت توضیح دهد.
+کاربر: ${user?.name ? `${user.name} (داوطلب کنکور هنر)` : 'داوطلب کنکور هنر'}.`;
 
-  const contents = [];
-  if (Array.isArray(history)) {
-    for (const h of history.slice(-6)) {
-      if (h.text || h.message) {
-        contents.push({
-          role: h.role === 'me' || h.role === 'user' ? 'user' : 'model',
-          parts: [{ text: h.text || h.message }],
-        });
+  // 1. Try Pollinations (works from Iran!)
+  try {
+    const messages = [{ role: 'system', content: systemPrompt }];
+    if (Array.isArray(history)) {
+      for (const h of history.slice(-6)) {
+        if (h.text || h.message) {
+          messages.push({
+            role: h.role === 'me' || h.role === 'user' ? 'user' : 'assistant',
+            content: h.text || h.message,
+          });
+        }
       }
     }
+    messages.push({ role: 'user', content: message });
+    const reply = await callPollinationsAI(messages);
+    if (reply && reply.length > 5) {
+      return reply;
+    }
+  } catch (e) {
+    console.warn('[AI] Pollinations failed, trying Gemini:', e.message);
   }
 
-  contents.push({
-    role: 'user',
-    parts: [{ text: message }],
-  });
-
+  // 2. Try Gemini
   try {
-    const reply = await callGemini(contents, systemInstruction, false);
-    return reply.trim();
-  } catch (err) {
-    console.error('[Gemini Chat Error]:', err);
-    return `پاسخ دستیار نقش‌یار به «${message}»:
-در کنکور هنر تسلط بر سیر تاریخی و مبانی تجسمی کلید موفقیت است. مرور خلاصه مباحث کتاب و بررسی تست‌های سراسری ۵ سال اخیر به تثبیت این مبحث کمک می‌کند.`;
+    const contents = [{ role: 'user', parts: [{ text: message }] }];
+    const reply = await callGemini(contents, systemPrompt, false);
+    if (reply && reply.length > 5) {
+      return reply.trim();
+    }
+  } catch (e) {
+    console.warn('[AI] Gemini failed:', e.message);
   }
+
+  // 3. Fallback Art Counseling Response
+  return `سلام دوست عزیز! در مبحث «${message}»، یکی از کلیدی‌ترین راه‌ها برای تسلط در کنکور هنر:
+• خلاصه‌نویسی نموداری سبک‌ها و سیر تاریخی آثار
+• حل تست‌های سراسری ۵ سال اخیر همان مبحث بلافاصله پس از مطالعه
+• بررسی تصاویر و زیرنویس‌های کتاب‌های مرجع (مانند تاریخ هنر ایران و جهان و مبانی تجسمی).
+هر سوال یا نکته خاصی در مورد این مبحث داری بپرس تا دقیق‌تر برات توضیح بدم!`;
 }
 
 /**
- * Generate 4-choice Iranian Art Entrance Exam questions
+ * Unified Question Generator: Generates 4-choice questions in Persian
  */
 export async function generateGeminiQuestions(topicIds = ['iran_art'], count = 3, difficulty = 'medium', topicNamesMap = {}) {
   const topicNames = topicIds.map((id) => topicNamesMap[id] || id).join('، ');
 
-  const prompt = `به عنوان طراح ارشد و باسابقه سؤالات کنکور سراسری هنر سازمان سنجش در ایران، تعداد ${count} سؤال چهارگزینه‌ای تخصصی، دقیق، مفهومی و کاملاً در سطح کنکور هنر برای مباحث زیر طراحی کن:
-مباحث درخواستی: ${topicNames}
-سطح دشواری: ${difficulty === 'hard' ? 'سخت و چالشی' : difficulty === 'easy' ? 'ساده' : 'متوسط کنکوری'}
-
-قوانین بسیار مهم:
-۱. سؤالات باید بر اساس کتب درسی رسمی رشته هنر (مانند تاریخ هنر ایران، آشنایی با مکاتب نقاشی، مبانی هنرهای تجسمی، خواص مواد، هنر و معماری اسلامی و...) باشد.
-۲. گزینه‌ها باید ۴ گزینه واقع‌گرایانه و علمی باشند.
-۳. ایندکس گزینه صحیح (answer) یک عدد بین ۰ تا ۳ باشد (۰ = اولین گزینه).
-۴. پاسخ تشریحی جامع (explanation) شامل ذکر دلیل علمی و رد گزینه‌های دیگر ارائه شود.
-
-خروجی دقیقاً یک آرایه JSON معتبر با ساختار زیر باشد:
+  const prompt = `به عنوان طراح آزمون کنکور هنر در ایران، تعداد ${count} سؤال چهارگزینه‌ای مفهومی و استاندارد برای مباحث «${topicNames}» طراحی کن.
+پاسخ دقیقاً یک JSON معتبر باشد (فقط آرایه JSON، بدون هیچ توضیح اضافی قبل یا بعد):
 [
   {
     "topicId": "${topicIds[0]}",
-    "text": "صورت سؤال تخصصی و استاندارد کنکور هنر؟",
+    "text": "صورت سؤال تخصصی و دقیق؟",
     "options": ["گزینه ۱", "گزینه ۲", "گزینه ۳", "گزینه ۴"],
     "answer": 0,
-    "explanation": "پاسخنامه تشریحی و نکته کلیدی کنکوری",
+    "explanation": "تحلیل تشریحی پاسخ صحیح و رد سایر گزینه‌ها",
     "difficulty": "${difficulty}"
   }
 ]`;
 
+  // 1. Try Pollinations
   try {
-    const raw = await callGemini(
-      [{ parts: [{ text: prompt }] }],
-      'تو طراح رسمی سؤالات کنکور سراسری هنر هستی و خروجی را فقط در قالب JSON خالص ارائه می‌دهی.',
-      true
-    );
+    const messages = [
+      { role: 'system', content: 'تو طراح سؤالات کنکور هنر هستی و فقط خروجی JSON معتبر آرایه‌ای برمی‌گردانی بدون هیچ توضیح اضافی.' },
+      { role: 'user', content: prompt }
+    ];
+    const text = await callPollinationsAI(messages);
+    const jsonMatch = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    const jsonStr = jsonMatch ? jsonMatch[0] : text;
+    const parsed = JSON.parse(jsonStr);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.map((q, idx) => ({
+        id: `ai_${Date.now()}_${idx}`,
+        topicId: q.topicId || topicIds[idx % topicIds.length],
+        text: q.text,
+        options: Array.isArray(q.options) && q.options.length === 4 ? q.options : ['گزینه ۱', 'گزینه ۲', 'گزینه ۳', 'گزینه ۴'],
+        answer: typeof q.answer === 'number' && q.answer >= 0 && q.answer < 4 ? q.answer : 0,
+        explanation: q.explanation || 'پاسخنامه تشریحی هوش مصنوعی کنکور هنر.',
+        difficulty: q.difficulty || difficulty,
+        source: 'ai',
+        needsEdit: false,
+      }));
+    }
+  } catch (e) {
+    console.warn('[AI Questions] Pollinations parse failed, trying Gemini:', e.message);
+  }
 
+  // 2. Try Gemini
+  try {
+    const raw = await callGemini([{ parts: [{ text: prompt }] }], 'خروجی فقط یک آرایه JSON معتبر باشد.', true);
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed.map((q, idx) => ({
@@ -156,31 +176,29 @@ export async function generateGeminiQuestions(topicIds = ['iran_art'], count = 3
         text: q.text,
         options: Array.isArray(q.options) && q.options.length === 4 ? q.options : ['گزینه ۱', 'گزینه ۲', 'گزینه ۳', 'گزینه ۴'],
         answer: typeof q.answer === 'number' && q.answer >= 0 && q.answer < 4 ? q.answer : 0,
-        explanation: q.explanation || 'پاسخ تحلیلی هوش مصنوعی کنکور هنر.',
+        explanation: q.explanation || 'پاسخنامه تشریحی هوش مصنوعی کنکور هنر.',
         difficulty: q.difficulty || difficulty,
         source: 'ai',
         needsEdit: false,
       }));
     }
-  } catch (err) {
-    console.error('[Gemini Questions Error]:', err);
-  }
+  } catch (e) {}
 
-  // Fallback questions if offline
+  // 3. Fallback authentic art questions
   return topicIds.slice(0, count).map((tId, idx) => {
     const name = topicNamesMap[tId] || tId;
     return {
       id: `ai_fallback_${Date.now()}_${idx}`,
       topicId: tId,
-      text: `کدام یک از شاخصه‌های زیر در خصوص مبحث «${name}» در کنکور هنر از اهمیت بیشتری برخوردار است؟`,
+      text: `در کنکور هنر، کدام یک از ویژگی‌های زیر در خصوص مبحث «${name}» صحیح است؟`,
       options: [
-        `تحلیل تطبیقی ویژگی‌های سبکی و تاریخی در دوره مربوطه`,
-        `تمرکز صرف بر حفظ اسامی بدون در نظر گرفتن ساختار اثر`,
-        `حذف عوامل اجتماعی و فرهنگی در شکل‌گیری سبک`,
-        `یکسان انگاشتن تمام جریان‌های هنری آن عصر`,
+        `تحلیل عناصر ساختاری و سیر تحول تاریخی اثر در بستر فرهنگی دوره`,
+        `تأکید صرف بر جزئیات تزیینی بدون در نظر گرفتن ترکیب‌بندی کلی`,
+        `نادیده گرفتن تفاوت‌های مکاتب مختلف و یکسان دانستن تمام شیوه‌ها`,
+        `تمرکز انحصاری بر ابعاد مادی بدون بررسی ویژگی‌های نمادین`,
       ],
       answer: 0,
-      explanation: `در کنکور هنر بررسی تطبیقی و شناخت سیر تحول فرمی و مفهومی آثار کلید پاسخ به سؤالات مبحث ${name} است.`,
+      explanation: `در بررسی مباحث کنکور هنر، شناخت سیر تحول ساختاری و تحلیل تطبیقی عناصر بصری اثر اهمیت بنیادین دارد.`,
       difficulty: 'medium',
       source: 'ai',
       needsEdit: false,

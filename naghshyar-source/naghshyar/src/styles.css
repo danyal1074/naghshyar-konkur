@@ -423,11 +423,15 @@ button.list-row:hover, a.list-row:hover { border-color: var(--lapis); }
 
 /* ── Real-time Chat ── */
 .chat-layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; min-height: calc(100vh - 120px); height: calc(100vh - 120px); background: #fff; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.chat-layout.student-chat { grid-template-columns: 1fr; }
+.chat-layout.student-chat .chat-sidebar { display: none !important; }
+.chat-layout.student-chat .chat-main { display: flex !important; }
 .chat-back-btn { display: none; }
 @media (max-width: 768px) {
-  .chat-layout { grid-template-columns: 1fr; height: calc(100vh - 130px); }
+  .chat-layout { grid-template-columns: 1fr; height: calc(100vh - 120px); min-height: calc(100vh - 120px); border-radius: 12px; }
   .chat-layout.has-selected .chat-sidebar { display: none; }
-  .chat-layout:not(.has-selected) .chat-main { display: none; }
+  .chat-layout:not(.has-selected):not(.student-chat) .chat-main { display: none; }
+  .chat-layout.student-chat .chat-main { display: flex !important; }
   .chat-back-btn { display: inline-flex; }
 }
 .chat-sidebar { border-inline-end: 1px solid var(--line); display: flex; flex-direction: column; background: #faf9f6; }
@@ -548,6 +552,21 @@ button.list-row:hover, a.list-row:hover { border-color: var(--lapis); }
   .modal-backdrop { align-items: flex-end; padding: 0; }
   .modal { border-radius: 20px 20px 0 0; max-width: none; max-height: 94vh; }
   .week-grid { grid-template-columns: repeat(7, 78%); }
+  
+  /* Mobile touch and app experience */
+  body { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  .content { padding: 14px 12px calc(var(--bar) + 24px + env(safe-area-inset-bottom)); }
+  .topbar { padding: 8px 12px; }
+  .tabbar { backdrop-filter: blur(12px); background: rgba(255, 255, 255, 0.95); }
+  .tab-item { font-size: 0.7rem; padding: 4px 0; }
+  .tab-item:active { transform: scale(0.94); }
+  .btn:active, .chip-toggle:active { transform: scale(0.97); }
+  .plan-toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
+  .plan-toolbar .week-nav { justify-content: space-between; }
+  .chips-light span { font-size: 0.78rem; padding: 3px 10px; }
+  .today-hero { flex-direction: column; text-align: center; gap: 16px; }
+  .today-hero .chips-light { justify-content: center; }
+  .chat-textarea { font-size: 16px !important; } /* Prevents iOS auto-zoom */
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }

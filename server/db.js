@@ -7,8 +7,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = resolve(__dirname, 'naghshyar.db');
 export const db = new DatabaseSync(dbPath);
 
-// Enable WAL mode for high concurrency
+// Enable WAL mode & performance tuning
 db.exec('PRAGMA journal_mode = WAL;');
+db.exec('PRAGMA synchronous = NORMAL;');
+db.exec('PRAGMA cache_size = -64000;');
 
 export function initDb() {
   db.exec(`
@@ -123,6 +125,12 @@ export function initDb() {
       created_at TEXT NOT NULL,
       read INTEGER DEFAULT 0
     );
+
+    CREATE INDEX IF NOT EXISTS idx_tasks_student_date ON tasks(student_id, date);
+    CREATE INDEX IF NOT EXISTS idx_chat_users ON chat_messages(sender_id, receiver_id);
+    CREATE INDEX IF NOT EXISTS idx_practice_student ON practice(student_id);
+    CREATE INDEX IF NOT EXISTS idx_exam_results_student ON exam_results(student_id);
+    CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
   `);
 
   // Check if seed is needed

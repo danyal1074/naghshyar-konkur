@@ -11,12 +11,12 @@ export const NAV = {
   student: [
     { to: '/s', label: 'امروز', icon: 'home', end: true, bar: true },
     { to: '/s/plan', label: 'برنامه', icon: 'calendar', bar: true },
-    { to: '/s/chat', label: 'گفتگو با مشاور', icon: 'chat', bar: true },
+    { to: '/s/chat', label: 'گفتگو', sideLabel: 'گفتگو با مشاور', icon: 'chat', bar: true },
     { to: '/s/exams', label: 'آزمون‌ها', icon: 'exam', bar: true },
     { to: '/s/progress', label: 'پیشرفت', icon: 'chart' },
     { to: '/s/study', label: 'زمان مطالعه', icon: 'timer' },
     { to: '/s/practice', label: 'بخش عملی', icon: 'brush' },
-    { to: '/s/assistant', label: 'دستیار درسی', icon: 'sparkle', bar: true },
+    { to: '/s/assistant', label: 'دستیار', sideLabel: 'دستیار درسی', icon: 'sparkle', bar: true },
   ],
   counselor: [
     { to: '/c', label: 'دانش‌آموزان', icon: 'users', end: true, bar: true },
@@ -149,7 +149,7 @@ export default function Shell({ role }) {
           {items.map((i) => (
             <NavLink key={i.to} to={i.to} end={i.end} className={({ isActive }) => `side-link ${isActive ? 'on' : ''}`}>
               <Icon name={i.icon} size={21} />
-              {i.label}
+              {i.sideLabel || i.label}
             </NavLink>
           ))}
         </nav>
@@ -169,7 +169,7 @@ export default function Shell({ role }) {
         {barItems.map((i) => (
           <NavLink key={i.to} to={i.to} end={i.end} className={({ isActive }) => `tab-item ${isActive ? 'on' : ''}`}>
             <Icon name={i.icon} size={23} />
-            <span>{i.label}</span>
+            <span>{i.barLabel || i.label}</span>
           </NavLink>
         ))}
         {moreItems.length > 0 && (
