@@ -28,7 +28,7 @@ export function Today() {
   const nextId = list.find((t) => !t.done)?.id;
   const newExam = (exams.data || []).find((e) => e.status === 'new');
   const weak = (prog.data?.topics || []).find((t) => t.accuracy < 60 && t.total >= 2);
-  const first = user.name.split(' ')[0];
+  const first = (user?.name || 'دانش‌آموز').trim().split(' ')[0] || 'دانش‌آموز';
   const left = list.length - done;
 
   const toggle = async (t) => {

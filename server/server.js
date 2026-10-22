@@ -906,6 +906,13 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const staticDir = resolve(__dirname, '../naghshyar-demo-build');
 app.use(express.static(staticDir));
+app.use((req, res, next) => {
+  if (req.path.includes('/assets/')) {
+    const assetSub = req.path.substring(req.path.indexOf('/assets/'));
+    return res.sendFile(resolve(staticDir, '.' + assetSub));
+  }
+  next();
+});
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   res.sendFile(resolve(staticDir, 'index.html'));

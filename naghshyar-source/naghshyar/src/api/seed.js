@@ -372,8 +372,8 @@ export function buildSeed() {
   for (const st of students) {
     const weeks = st.id === 's1' ? [-1, 0, 1] : st.id === 's6' ? [0] : [-1, 0];
     for (const w of weeks) {
-      const tpl = st.id === 's4' || st.id === 's3' ? tplMap.theory : st.id === 's2' ? tplMap.practical : tplMap.balanced;
-      for (const t of tpl.tasks) {
+      const tpl = st.id === 's4' || st.id === 's3' ? (tplMap.theory_heavy || tplMap.balanced) : st.id === 's2' ? (tplMap.painting || tplMap.balanced) : tplMap.balanced;
+      for (const t of (tpl?.tasks || [])) {
         const date = toISO(addDays(wk, w * 7 + t.day));
         let done = false;
         if (date < today) done = rand() < st.diligence;
