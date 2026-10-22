@@ -26,11 +26,11 @@ export function Chat() {
   const threads = useAsync(() => (isCounselor ? api.listChatThreads() : Promise.resolve([])), [isCounselor]);
 
   // Determine who the current chat target is:
-  // If student: target is user.counselorId
+  // If student: target is user.counselorId or default head counselor 'c1'
   // If counselor: target is selectedStudentId or first student in thread list
   const activeStudentId = isCounselor
     ? selectedStudentId || threads.data?.[0]?.student?.id
-    : user?.counselorId;
+    : user?.counselorId || 'c1';
 
   const [messages, setMessages] = useState([]);
   const [loadingMsgs, setLoadingMsgs] = useState(false);

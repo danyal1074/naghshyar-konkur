@@ -3,8 +3,9 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import api from '../api';
 import { KONKUR_DATE } from '../config';
 import { useAuth } from '../auth';
-import { Badge, Button, Empty, ErrorBox, Field, Icon, Loading, Modal, PageHead, Ring, SubjectDot, useToast } from '../ui';
+import { Badge, Button, Empty, ErrorBox, Field, Icon, Loading, Modal, PageHead, Ring, SubjectDot, useConfirm, useToast } from '../ui';
 import { TaskRow, WeekNav } from '../components';
+import { TaskModal } from './counselor1';
 import { useAsync, useSyllabus } from '../lib/hooks';
 import { WEEKDAYS, addDays, daysUntil, faNum, fmtClock, fmtDateISO, fmtFull, fmtMinutes, fromISO, relativeDay, toISO, todayISO, weekStart } from '../lib/dates';
 
@@ -18,6 +19,7 @@ export function Today() {
   const tasks = useAsync(() => api.listTasks(user.id, today, today), [user.id]);
   const exams = useAsync(() => api.listExams(), []);
   const prog = useAsync(() => api.getProgress(user.id), [user.id]);
+  const [addEdit, setAddEdit] = useState(null);
 
   if (tasks.error && !tasks.data) return <ErrorBox error={tasks.error} onRetry={tasks.reload} />;
   const list = tasks.data || [];
@@ -71,16 +73,22 @@ export function Today() {
       )}
 
       <section>
-        <h2 className="sec-title">کارهای امروز</h2>
+        <div className="row between mb-s">
+          <h2 className="sec-title" style={{ margin: 0 }}>کارهای امروز</h2>
+          <Button size="sm" icon="plus" variant="soft" onClick={() => setAddEdit({ date: today })}>
+            افزودن کار برای امروز
+          </Button>
+        </div>
         {tasks.loading && !tasks.data ? <Loading /> : list.length === 0 ? (
           <Empty
             icon="calendar"
             title="برای امروز برنامه‌ای ثبت نشده است"
-            text="می‌توانی از بخش برنامه‌ی هفته یک قالب آماده را اعمال کنی یا با زمان‌سنج، مطالعه‌ات را شروع کنی."
+            text="می‌توانی از بخش برنامه‌ی هفته یک قالب آماده را اعمال کنی یا با دکمه‌ی زیر کار دلخواهت را اضافه کنی."
             action={
               <div className="row wrap">
-                <Link className="btn btn-primary" to="/s/plan">انتخاب قالب برنامه‌ریزی</Link>
-                <Link className="btn btn-soft" to="/s/study">رفتن به زمان‌سنج</Link>
+                <Button icon="plus" onClick={() => setAddEdit({ date: today })}>افزودن کار برای امروز</Button>
+                <Link className="btn btn-soft" to="/s/plan">انتخاب قالب برنامه‌ریزی</Link>
+                <Link className="btn btn-ghost" to="/s/study">رفتن به زمان‌سنج</Link>
               </div>
             }
           />
@@ -105,6 +113,16 @@ export function Today() {
           <Link className="btn btn-soft btn-sm" to={`/s/assistant?q=${encodeURIComponent(`مبحث «${weak.name}» را برایم خلاصه توضیح بده`)}`}>مرور کنیم</Link>
         </section>
       )}
+
+      {addEdit && (
+        <TaskModal
+          edit={addEdit}
+          ws={today}
+          student={user}
+          onClose={() => setAddEdit(null)}
+          onSaved={() => { setAddEdit(null); tasks.reload(); }}
+        />
+      )}
     </div>
   );
 }
@@ -113,12 +131,18 @@ export function Today() {
 export function Plan() {
   const { user } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
+  const { subject, topic } = useSyllabus();
   const [ws, setWs] = useState(toISO(weekStart()));
   const nav = useNavigate();
   const end = toISO(addDays(fromISO(ws), 6));
   const tasks = useAsync(() => api.listTasks(user.id, ws, end), [ws, user.id]);
   const tpls = useAsync(() => api.listTemplates(), []);
   const [tplOpen, setTplOpen] = useState(false);
+  const [selectedTpl, setSelectedTpl] = useState(null);
+  const [applying, setApplying] = useState(false);
+  const [editTask, setEditTask] = useState(null);
+
   const today = todayISO();
   const list = tasks.data || [];
   const days = useMemo(() => [...Array(7)].map((_, i) => {
@@ -136,13 +160,52 @@ export function Plan() {
   };
 
   const applyTemplate = async (t) => {
+    setApplying(true);
     try {
       await api.applyTemplate(user.id, t.id, ws);
       toast(`قالب «${t.name}» روی برنامه‌ی این هفته اعمال شد.`);
       setTplOpen(false);
+      setSelectedTpl(null);
       tasks.reload();
     } catch (e) {
       toast(e.message, 'err');
+    }
+    setApplying(false);
+  };
+
+  const copyNext = async () => {
+    const nextWs = toISO(addDays(fromISO(ws), 7));
+    const ok = await confirm({
+      title: 'کپی به هفته بعد؟',
+      text: `آیا مایلید تمام ${faNum(list.length)} کار این هفته به هفته‌ی بعد کپی شوند؟`,
+      confirmLabel: 'کپی به هفته بعد',
+    });
+    if (ok) {
+      try {
+        await api.copyWeek(user.id, ws, nextWs);
+        toast('برنامه با موفقیت به هفته بعد کپی شد.');
+        setWs(nextWs);
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+    }
+  };
+
+  const clearWeek = async () => {
+    const ok = await confirm({
+      title: 'حذف برنامه‌های این هفته؟',
+      text: `آیا از حذف تمام ${faNum(list.length)} برنامه این هفته مطمئن هستید؟ این عملیات قابل بازگشت نیست.`,
+      confirmLabel: 'حذف کل برنامه هفته',
+      danger: true,
+    });
+    if (ok) {
+      try {
+        await api.clearWeek(user.id, ws);
+        toast('برنامه‌های این هفته پاک شدند.');
+        tasks.reload();
+      } catch (e) {
+        toast(e.message, 'err');
+      }
     }
   };
 
@@ -151,13 +214,37 @@ export function Plan() {
       <PageHead
         title="برنامه‌ی هفته"
         sub="برنامه‌ی مطالعاتی کنکور هنر؛ کارهای انجام‌شده را تیک بزن تا در گزارش پیشرفتت ثبت شوند."
-        actions={<Button icon="copy" variant="soft" onClick={() => setTplOpen(true)}>انتخاب قالب آماده</Button>}
+        actions={
+          <div className="row wrap">
+            <Button icon="plus" onClick={() => setEditTask({ date: ws })}>افزودن کار دلخواه</Button>
+            <Button icon="copy" variant="soft" onClick={() => { setTplOpen(true); setSelectedTpl(null); }}>
+              انتخاب قالب آماده
+            </Button>
+          </div>
+        }
       />
-      <WeekNav start={ws} onChange={setWs} />
+
+      <div className="plan-toolbar">
+        <WeekNav start={ws} onChange={setWs} />
+        <div className="row wrap">
+          {list.length > 0 && (
+            <>
+              <Button variant="ghost" size="sm" icon="refresh" onClick={copyNext}>
+                کپی به هفته‌ی بعد
+              </Button>
+              <Button variant="ghost" size="sm" icon="trash" onClick={clearWeek}>
+                پاک کردن این هفته
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
       <div className="statstrip slim">
         <div><small>کل زمان برنامه</small><b>{fmtMinutes(planned)}</b></div>
         <div><small>انجام‌شده</small><b>{faNum(done)} از {faNum(list.length)}</b></div>
       </div>
+
       {tasks.loading && !tasks.data ? <Loading /> : (
         <div className="days">
           {days.map((d) => {
@@ -166,13 +253,32 @@ export function Plan() {
               <section key={d.date} className={`day ${d.date === today ? 'today' : ''}`}>
                 <header>
                   <h3>{d.name} <span className="muted">{fmtDateISO(d.date)}</span></h3>
-                  {d.date === today && <Badge tone="info">امروز</Badge>}
-                  {d.tasks.length > 0 && <span className="muted sm">{faNum(dn)} از {faNum(d.tasks.length)}</span>}
+                  <div className="row">
+                    {d.date === today && <Badge tone="info">امروز</Badge>}
+                    {d.tasks.length > 0 && <span className="muted sm">{faNum(dn)} از {faNum(d.tasks.length)}</span>}
+                    <button
+                      className="link sm"
+                      style={{ marginRight: 6 }}
+                      onClick={() => setEditTask({ date: d.date })}
+                      title="افزودن کار برای این روز"
+                    >
+                      <Icon name="plus" size={14} />
+                    </button>
+                  </div>
                 </header>
                 {d.tasks.length === 0 ? (
                   <p className="muted sm pad-s">کاری ثبت نشده است.</p>
                 ) : (
-                  <div className="task-list">{d.tasks.map((t) => <TaskRow key={t.id} task={t} onToggle={toggle} onStart={d.date === today ? start : undefined} />)}</div>
+                  <div className="task-list">
+                    {d.tasks.map((t) => (
+                      <TaskRow
+                        key={t.id}
+                        task={t}
+                        onToggle={toggle}
+                        onStart={d.date === today ? start : undefined}
+                      />
+                    ))}
+                  </div>
                 )}
               </section>
             );
@@ -184,25 +290,120 @@ export function Plan() {
         <Empty
           icon="calendar"
           title="برای این هفته برنامه‌ای تنظیم نشده است"
-          text="می‌توانی با انتخاب یکی از قالب‌های استاندارد (متعادل، نظری یا عملی)، به سرعت برنامه‌ریزی هفته‌ات را تکمیل کنی."
-          action={<Button icon="copy" onClick={() => setTplOpen(true)}>انتخاب قالب آماده برای شروع</Button>}
+          text="می‌توانی با انتخاب یکی از قالب‌های استاندارد (متعادل، گرافیک، نقاشی، سینما یا تست‌زنی)، به سرعت جدول هفته‌ات را تکمیل کنی."
+          action={
+            <div className="row wrap">
+              <Button icon="copy" onClick={() => { setTplOpen(true); setSelectedTpl(null); }}>
+                انتخاب قالب آماده برای شروع
+              </Button>
+              <Button variant="soft" icon="plus" onClick={() => setEditTask({ date: ws })}>
+                افزودن کار دستی
+              </Button>
+            </div>
+          }
         />
       )}
 
-      <Modal open={tplOpen} onClose={() => setTplOpen(false)} title="قالب‌های برنامه‌ریزی هفتگی کنکور هنر">
-        <div className="stack">
-          <p className="muted sm">یکی از قالب‌های استاندارد را انتخاب کن تا جدول هفتگی‌ات به صورت خودکار با درس‌های کنکور هنر پر شود:</p>
-          {(tpls.data || []).map((t) => (
-            <button key={t.id} className="tpl" onClick={() => applyTemplate(t)}>
+      {/* Template Selection Modal */}
+      <Modal
+        open={tplOpen}
+        onClose={() => { setTplOpen(false); setSelectedTpl(null); }}
+        title="قالب‌های برنامه‌ریزی هفتگی کنکور هنر"
+        wide
+        footer={
+          selectedTpl ? (
+            <div className="row between grow">
+              <Button variant="ghost" onClick={() => setSelectedTpl(null)}>
+                بازگشت به لیست قالب‌ها
+              </Button>
+              <Button loading={applying} icon="check" onClick={() => applyTemplate(selectedTpl)}>
+                اعمال این قالب روی هفته جاری
+              </Button>
+            </div>
+          ) : (
+            <Button variant="ghost" onClick={() => setTplOpen(false)}>بستن</Button>
+          )
+        }
+      >
+        {!selectedTpl ? (
+          <div className="stack">
+            <p className="muted sm">
+              یکی از قالب‌های استاندارد کنکور هنر را انتخاب کن تا جدول هفتگی‌ات به صورت خودکار با درس‌های مصوب پر شود:
+            </p>
+            <div className="stack-sm">
+              {(tpls.data || []).map((t) => (
+                <article
+                  key={t.id}
+                  className="tpl clickable"
+                  style={{ cursor: 'pointer', textAlign: 'right', display: 'flex', alignItems: 'center' }}
+                  onClick={() => setSelectedTpl(t)}
+                >
+                  <div className="grow">
+                    <div className="row wrap" style={{ gap: 6, marginBottom: 4 }}>
+                      <b>{t.name}</b>
+                      {t.badge && <Badge tone="info">{t.badge}</Badge>}
+                    </div>
+                    <p className="muted sm" style={{ margin: 0 }}>{t.desc}</p>
+                  </div>
+                  <div style={{ textAlign: 'left', minWidth: 120 }}>
+                    <span className="badge tone-neutral sm">{faNum(t.taskCount)} کار</span>
+                    <div className="muted sm" style={{ marginTop: 4 }}>{fmtMinutes(t.minutes)}</div>
+                  </div>
+                  <Icon name="chevL" size={18} className="row-arrow" />
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="stack">
+            <div className="callout soft">
               <div className="grow">
-                <b>{t.name}</b>
-                <small className="muted">{t.desc}</small>
+                <h3>{selectedTpl.name}</h3>
+                <p className="muted sm">{selectedTpl.desc}</p>
+                <div className="chips-light" style={{ marginTop: 8 }}>
+                  <span>{faNum(selectedTpl.taskCount)} برنامه هفتگی</span>
+                  <span>مجموع {fmtMinutes(selectedTpl.minutes)} در کل هفته</span>
+                </div>
               </div>
-              <span className="muted sm">{faNum(t.taskCount)} کار · {fmtMinutes(t.minutes)}</span>
-            </button>
-          ))}
-        </div>
+            </div>
+
+            <h4>پیش‌نمایش برنامه‌ی روزانه این قالب:</h4>
+            <div className="stack-sm">
+              {[...Array(7)].map((_, dayIdx) => {
+                const dayTasks = (selectedTpl.tasks || []).filter((x) => x.day === dayIdx);
+                if (!dayTasks.length) return null;
+                return (
+                  <div key={dayIdx} className="block" style={{ padding: 10 }}>
+                    <b style={{ color: 'var(--lapis)' }}>{WEEKDAYS[dayIdx]}</b>
+                    <ul className="plain-list" style={{ marginTop: 6 }}>
+                      {dayTasks.map((x, idx) => (
+                        <li key={idx} className="row between" style={{ padding: '4px 0', borderBottom: '1px dashed var(--border)' }}>
+                          <span className="row" style={{ gap: 6 }}>
+                            <SubjectDot subject={subject(x.subjectId)} />
+                            <span>{x.title || `${topic(x.topicId)?.name || x.topicId}`}</span>
+                          </span>
+                          <span className="muted sm">{faNum(x.minutes)} دقیقه</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </Modal>
+
+      {/* Add / Edit Task Modal */}
+      {editTask && (
+        <TaskModal
+          edit={editTask}
+          ws={ws}
+          student={user}
+          onClose={() => setEditTask(null)}
+          onSaved={() => { setEditTask(null); tasks.reload(); }}
+        />
+      )}
     </div>
   );
 }

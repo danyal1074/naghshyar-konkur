@@ -100,7 +100,7 @@ export function Assistant() {
     setBusy(true);
     try {
       const r = await api.askAssistant(m, msgs.slice(-6));
-      setMsgs((x) => [...x, { role: 'bot', text: r.reply }]);
+      setMsgs((x) => [...x, { role: 'bot', text: r.reply || r.text || 'پاسخ دریافت شد.' }]);
     } catch (e) {
       setMsgs((x) => [...x, { role: 'bot', text: 'جواب را نتوانستم بگیرم. دوباره امتحان کن.', error: true }]);
     }

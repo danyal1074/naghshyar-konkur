@@ -226,7 +226,18 @@ export const applyTemplate = (studentId, templateId, weekStartISO) => {
   if (!tpl) return fail('قالب پیدا نشد.');
   const ws = fromISO(weekStartISO);
   for (const x of tpl.tasks) {
-    db.tasks.push({ id: nid('t'), studentId, date: toISO(addDays(ws, x.day)), subjectId: x.subjectId, topicId: x.topicId, type: x.type, minutes: x.minutes, title: `${typeLabel[x.type]} ${topicName[x.topicId]}`, note: '', done: false });
+    db.tasks.push({
+      id: nid('t'),
+      studentId,
+      date: toISO(addDays(ws, x.day)),
+      subjectId: x.subjectId,
+      topicId: x.topicId,
+      type: x.type,
+      minutes: x.minutes,
+      title: x.title || `${typeLabel[x.type]} ${topicName[x.topicId] || x.topicId}`,
+      note: x.note || '',
+      done: false,
+    });
   }
   persist();
   return wait({ added: tpl.tasks.length });

@@ -57,7 +57,7 @@ app.post('/api/auth/verify', (req, res) => {
     const color = userRole === 'counselor' ? '#e5446d' : '#2b3fd6';
     db.prepare(`
       INSERT INTO users (id, role, name, phone, field, color, counselor_id, plan, status, renew_at, speciality)
-      VALUES (?, ?, ?, ?, ?, ?, null, ?, 'active', null, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', null, ?)
     `).run(
       id,
       userRole,
@@ -65,6 +65,7 @@ app.post('/api/auth/verify', (req, res) => {
       cleanPhone,
       userRole === 'student' ? (field || 'گرافیک') : null,
       color,
+      userRole === 'student' ? 'c1' : null,
       userRole === 'counselor' ? 'trial' : null,
       userRole === 'counselor' ? 'مشاور کنکور هنر' : null
     );
@@ -174,7 +175,7 @@ app.get('/api/students/:id/tasks', authRequired, (req, res) => {
 });
 
 app.post('/api/students/:id/tasks', authRequired, (req, res) => {
-  const studentId = req.params.id;
+  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
   const { date, subjectId, topicId, type, minutes, note, title } = req.body;
   const id = uid('t');
   db.prepare(`
@@ -230,13 +231,13 @@ app.post('/api/tasks/:id/done', authRequired, (req, res) => {
 
 app.post('/api/students/:id/plan/template', authRequired, (req, res) => {
   const { templateId, weekStart } = req.body;
-  const studentId = req.params.id;
+  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
   const tpl = TEMPLATES.find((t) => t.id === templateId);
   if (!tpl) return res.status(404).json({ message: 'قالب پیدا نشد.' });
 
   const insert = db.prepare(`
     INSERT INTO tasks (id, student_id, date, subject_id, topic_id, type, minutes, title, note, done)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, "", 0)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
 
   const [y, m, d] = weekStart.split('-').map(Number);
@@ -246,7 +247,7 @@ app.post('/api/students/:id/plan/template', authRequired, (req, res) => {
     const taskDate = new Date(base);
     taskDate.setDate(taskDate.getDate() + t.day);
     const iso = `${taskDate.getFullYear()}-${String(taskDate.getMonth() + 1).padStart(2, '0')}-${String(taskDate.getDate()).padStart(2, '0')}`;
-    insert.run(uid('t'), studentId, iso, t.subjectId, t.topicId, t.type, t.minutes, `${t.type} ${t.topicId}`);
+    insert.run(uid('t'), studentId, iso, t.subjectId, t.topicId, t.type, t.minutes, t.title || `${t.type} ${t.topicId}`, t.note || '');
   }
 
   res.json({ added: tpl.tasks.length });
@@ -254,7 +255,7 @@ app.post('/api/students/:id/plan/template', authRequired, (req, res) => {
 
 app.post('/api/students/:id/plan/copy-week', authRequired, (req, res) => {
   const { fromWeekStart, toWeekStart } = req.body;
-  const studentId = req.params.id;
+  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
 
   const [fy, fm, fd] = fromWeekStart.split('-').map(Number);
   const fStart = new Date(fy, fm - 1, fd);
@@ -286,7 +287,7 @@ app.post('/api/students/:id/plan/copy-week', authRequired, (req, res) => {
 
 app.delete('/api/students/:id/plan/week', authRequired, (req, res) => {
   const { weekStart } = req.query;
-  const studentId = req.params.id;
+  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
   const [y, m, d] = weekStart.split('-').map(Number);
   const wStart = new Date(y, m - 1, d);
   const wEnd = new Date(wStart);
@@ -379,6 +380,9 @@ app.get('/api/exams', authRequired, (req, res) => {
     const topicIds = JSON.parse(e.topic_ids);
 
     if (isStudent) {
+      const isEligible = !sIds.length || sIds.includes('*') || sIds.includes('all') || sIds.includes(req.user.id);
+      if (!isEligible) return null;
+
       const resRow = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(e.id, req.user.id);
       return {
         id: e.id,
@@ -409,7 +413,7 @@ app.get('/api/exams', authRequired, (req, res) => {
     }
   });
 
-  res.json(out);
+  res.json(out.filter(Boolean));
 });
 
 app.post('/api/exams', authRequired, (req, res) => {
@@ -671,6 +675,11 @@ app.post('/api/study-sessions', authRequired, (req, res) => {
     INSERT INTO study_sessions (id, student_id, date, subject_id, minutes, task_id, auto)
     VALUES (?, ?, ?, ?, ?, ?, 0)
   `).run(uid('ss'), req.user.id, today, subjectId, Number(minutes), taskId || null);
+
+  if (taskId) {
+    db.prepare('UPDATE tasks SET done = 1 WHERE id = ?').run(taskId);
+  }
+
   res.json({ ok: true });
 });
 
@@ -763,7 +772,7 @@ app.post('/api/ai/chat', authRequired, (req, res) => {
   const { message } = req.body;
   const reply = `پاسخ دستیار هوش مصنوعی به «${message}»:
 در کنکور هنر تسلط بر سیر تاریخی و ارتباط میان عناصر بصری اهمیت کلیدی دارد. توصیه می‌شود این مبحث را با خلاصه‌نویسی نموداری و حل حداقل ۲۰ تست کنکورهای سراسری ۵ سال اخیر تثبیت نمایید.`;
-  res.json({ text: reply });
+  res.json({ text: reply, reply: reply });
 });
 
 // ── Online Chat ──

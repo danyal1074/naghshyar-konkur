@@ -307,7 +307,7 @@ function PlanBuilder({ student }) {
   );
 }
 
-function TaskModal({ edit, ws, student, onClose, onSaved }) {
+export function TaskModal({ edit, ws, student, onClose, onSaved }) {
   const toast = useToast();
   const { subjects } = useSyllabus();
   const open = !!edit;
