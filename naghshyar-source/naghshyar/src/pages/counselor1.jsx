@@ -12,6 +12,7 @@ const STATUS = {
   warn: { tone: 'warn', label: 'نیاز به پیگیری' },
   late: { tone: 'bad', label: 'عقب‌مانده' },
   noplan: { tone: 'neutral', label: 'بدون برنامه' },
+  active: { tone: 'good', label: 'فعال' },
 };
 const ORDER = { late: 0, warn: 1, noplan: 2, good: 3 };
 
@@ -128,7 +129,8 @@ export function StudentDetail() {
   const { data: s, error, reload } = useAsync(() => api.getStudent(id), [id]);
   if (error && !s) return <ErrorBox error={error} onRetry={reload} />;
   if (!s) return <Loading />;
-  const st = STATUS[s.status];
+  const st = STATUS[s?.status] || STATUS.active || { tone: 'good', label: 'فعال' };
+  const shortName = (s?.name || 'دانش‌آموز').trim().split(' ')[0] || 'دانش‌آموز';
   return (
     <div className="stack-lg">
       <div className="student-head">
@@ -143,8 +145,8 @@ export function StudentDetail() {
             <Badge tone={st.tone}>{st.label}</Badge>
           </div>
           <div className="row wrap">
-            <Link className="btn btn-soft" to={`/c/chat?student=${s.id}`}><Icon name="chat" size={18} />گفتگو با {s.name.split(' ')[0]}</Link>
-            <Link className="btn btn-primary" to={`/c/exams/new?student=${s.id}`}><Icon name="exam" size={18} />ساخت آزمون برای {s.name.split(' ')[0]}</Link>
+            <Link className="btn btn-soft" to={`/c/chat?student=${s.id}`}><Icon name="chat" size={18} />گفتگو با {shortName}</Link>
+            <Link className="btn btn-primary" to={`/c/exams/new?student=${s.id}`}><Icon name="exam" size={18} />ساخت آزمون برای {shortName}</Link>
           </div>
         </div>
       </div>
@@ -228,7 +230,7 @@ function PlanBuilder({ student }) {
     const ok = await confirm({ title: 'پاک‌کردن برنامه‌ی این هفته؟', text: `همه‌ی ${faNum(list.length)} کار این هفته حذف می‌شود و برگشتی ندارد.`, confirmLabel: 'پاک کن', danger: true });
     if (ok) act(() => api.clearWeek(student.id, ws), 'برنامه‌ی هفته پاک شد.');
   };
-  const publish = async () => { await api.publishPlan(student.id, ws); toast(`به ${student.name.split(' ')[0]} اعلان فرستاده شد.`); };
+  const publish = async () => { await api.publishPlan(student.id, ws); toast(`به ${(student?.name || 'دانش‌آموز').trim().split(' ')[0]} اعلان فرستاده شد.`); };
 
   return (
     <div className="stack-lg">
@@ -246,7 +248,7 @@ function PlanBuilder({ student }) {
         <div className="callout warn">
           <Icon name="target" size={20} />
           <div className="grow">
-            <b>مبحث‌های ضعیف {student.name.split(' ')[0]}</b>
+            <b>مبحث‌های ضعیف {(student?.name || 'دانش‌آموز').trim().split(' ')[0]}</b>
             <div className="chip-row">
               {weak.map((t) => (
                 <button key={t.topicId} className="chip-toggle" onClick={() => setEdit({ date: defaultDate, preset: { type: 'review', subjectId: t.subjectId, topicId: t.topicId, minutes: 40 } })}>

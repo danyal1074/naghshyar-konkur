@@ -3,6 +3,7 @@ import cors from 'cors';
 import { randomBytes } from 'node:crypto';
 import { db, initDb } from './db.js';
 import { SUBJECTS, PLANS, TEMPLATES, FIELDS } from './seedData.js';
+import { askGeminiChat, generateGeminiQuestions } from './gemini.js';
 
 initDb();
 
@@ -137,7 +138,32 @@ app.get('/api/students', authRequired, (req, res) => {
 app.get('/api/students/:id', authRequired, (req, res) => {
   const s = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!s) return res.status(404).json({ message: 'دانش‌آموز یافت نشد.' });
-  res.json(s);
+
+  const now = new Date();
+  const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0'), d = String(now.getDate()).padStart(2, '0');
+  const today = `${y}-${m}-${d}`;
+
+  const tasks = db.prepare('SELECT * FROM tasks WHERE student_id = ?').all(s.id);
+  const pastTasks = tasks.filter((t) => t.date <= today);
+  const pastDone = pastTasks.filter((t) => t.done).length;
+  const pastRate = pastTasks.length ? pastDone / pastTasks.length : null;
+
+  let status = 'good';
+  if (!tasks.length) status = 'noplan';
+  else if (pastRate !== null) status = pastRate >= 0.7 ? 'good' : pastRate >= 0.4 ? 'warn' : 'late';
+
+  const results = db.prepare('SELECT percent FROM exam_results WHERE student_id = ?').all(s.id);
+  const avgScore = results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null;
+
+  res.json({
+    ...s,
+    status,
+    avgScore,
+    weekDone: tasks.filter((t) => t.done).length,
+    weekTotal: tasks.length,
+    lastActive: today,
+    pastRate,
+  });
 });
 
 app.post('/api/students', authRequired, (req, res) => {
@@ -349,24 +375,16 @@ app.delete('/api/questions/:id', authRequired, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/ai/questions', authRequired, (req, res) => {
-  const { count = 3, topicIds = ['iran_art'] } = req.body;
-  const drafts = [];
-  for (let i = 0; i < count; i++) {
-    const tId = topicIds[i % topicIds.length];
-    drafts.push({
-      id: `draft_${Date.now()}_${i}`,
-      topicId: tId,
-      text: `سؤال پیشنهادی هوش مصنوعی در مورد مبحث «${tId}» شماره ${i + 1}`,
-      options: ['گزینه صحیح نمونه', 'گزینه انحرافی اول', 'گزینه انحرافی دوم', 'گزینه انحرافی سوم'],
-      answer: 0,
-      explanation: 'پاسخ تحلیلی تولیدشده توسط دستیار هوش مصنوعی سامانه کنکور هنر.',
-      difficulty: 'medium',
-      source: 'ai',
-      needsEdit: true,
-    });
+app.post('/api/ai/questions', authRequired, async (req, res) => {
+  const { count = 3, topicIds = ['iran_art'], difficulty = 'medium' } = req.body;
+  const topicNamesMap = {};
+  for (const s of SUBJECTS) {
+    for (const t of s.topics) {
+      topicNamesMap[t.id] = t.name;
+    }
   }
-  res.json(drafts);
+  const questions = await generateGeminiQuestions(topicIds, Number(count) || 3, difficulty, topicNamesMap);
+  res.json(questions);
 });
 
 // ── Exams ──
@@ -768,10 +786,12 @@ app.post('/api/notifications/read', authRequired, (req, res) => {
 });
 
 // ── AI Assistant ──
-app.post('/api/ai/chat', authRequired, (req, res) => {
-  const { message } = req.body;
-  const reply = `پاسخ دستیار هوش مصنوعی به «${message}»:
-در کنکور هنر تسلط بر سیر تاریخی و ارتباط میان عناصر بصری اهمیت کلیدی دارد. توصیه می‌شود این مبحث را با خلاصه‌نویسی نموداری و حل حداقل ۲۰ تست کنکورهای سراسری ۵ سال اخیر تثبیت نمایید.`;
+app.post('/api/ai/chat', authRequired, async (req, res) => {
+  const { message, history } = req.body;
+  if (!message?.trim()) {
+    return res.status(400).json({ message: 'پیام خالی ارسال شده است.' });
+  }
+  const reply = await askGeminiChat(message.trim(), history || [], req.user);
   res.json({ text: reply, reply: reply });
 });
 
