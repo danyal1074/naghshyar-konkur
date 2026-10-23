@@ -34,6 +34,19 @@ export function initDb() {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS otps (
+      phone TEXT PRIMARY KEY,
+      code TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
       student_id TEXT NOT NULL,

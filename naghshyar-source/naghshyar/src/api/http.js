@@ -112,3 +112,5 @@ export const listCounselors = () => req('GET', '/admin/counselors');
 export const updateCounselor = (id, patch) => req('PATCH', `/admin/counselors/${id}`, patch);
 export const createCounselor = (data) => req('POST', '/admin/counselors', data);
 export const getAdminStats = () => req('GET', '/admin/stats');
+export const getSmsSettings = () => req('GET', '/admin/settings/sms');
+export const saveSmsSettings = (data) => req('POST', '/admin/settings/sms', data);

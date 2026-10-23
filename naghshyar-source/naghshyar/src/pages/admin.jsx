@@ -13,8 +13,11 @@ export function AdminHome() {
   const stats = useAsync(() => api.getAdminStats(), []);
   const list = useAsync(() => api.listCounselors(), []);
   const plans = useAsync(() => api.listPlans(), []);
+  const smsSettings = useAsync(() => api.getSmsSettings ? api.getSmsSettings() : Promise.resolve({}), []);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: '', phone: '', plan: 'trial' });
+  const [templateIdInput, setTemplateIdInput] = useState('');
+  const [savingSms, setSavingSms] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -34,6 +37,17 @@ export function AdminHome() {
     if (ok) { await api.updateCounselor(c.id, { status: suspend ? 'suspended' : 'active' }); toast(suspend ? 'مشاور معلق شد.' : 'مشاور فعال شد.'); list.reload(); stats.reload(); }
   };
   const changePlan = async (c, plan) => { await api.updateCounselor(c.id, { plan }); toast('پلن تغییر کرد.'); list.reload(); stats.reload(); };
+  const saveSms = async () => {
+    setSavingSms(true);
+    try {
+      await api.saveSmsSettings({ templateId: templateIdInput });
+      toast('شناسه قالب پیامک با موفقیت ذخیره شد.');
+      smsSettings.reload();
+    } catch (e) {
+      toast(e.message || 'خطا در ذخیره تنظیمات');
+    }
+    setSavingSms(false);
+  };
   const create = async () => {
     setBusy(true); setErr('');
     try {
@@ -79,6 +93,31 @@ export function AdminHome() {
               </div>
             );
           })}
+        </div>
+      </section>
+
+      <section className="block">
+        <div className="row between" style={{ marginBottom: '1rem' }}>
+          <h2>تنظیمات وب‌سرویس پیامک (sms.ir)</h2>
+          <Badge tone={smsSettings.data?.hasApiKey ? 'good' : 'bad'}>
+            {smsSettings.data?.hasApiKey ? 'کلید API متصل است' : 'کلید تنظیم نشده'}
+          </Badge>
+        </div>
+        <p className="muted sm">
+          جهت ارسال فوق‌سریع پیامک کد ورود (OTP) با عبور ۱۰۰٪ از بلک‌لیست مخابرات، یک قالب در پنل sms.ir ایجاد کرده و شناسه قالب عددی آن را در زیر وارد کنید.
+        </p>
+        <div className="row" style={{ gap: '0.75rem', alignItems: 'flex-end', marginTop: '1rem', maxWidth: 500 }}>
+          <Field label="شناسه قالب (Template ID)" hint={`شناسه فعلی: ${smsSettings.data?.templateId || 'ثبت نشده'}`}>
+            <input
+              className="input ltr"
+              placeholder="مثال: ۱۲۳۴۵۶"
+              value={templateIdInput || smsSettings.data?.templateId || ''}
+              onChange={(e) => setTemplateIdInput(e.target.value)}
+            />
+          </Field>
+          <Button loading={savingSms} onClick={saveSms}>
+            ذخیره شناسه
+          </Button>
         </div>
       </section>
 

@@ -27,15 +27,21 @@ export default function Login() {
 
   if (user) return <Navigate to={homeFor(user.role)} replace />;
 
+  const cleanNum = (str) =>
+    String(str || '')
+      .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+      .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+      .replace(/\s+/g, '');
+
   const send = async (e) => {
     e?.preventDefault();
     setErr('');
     setBusy(true);
     try {
-      const res = await api.sendOtp(phone);
+      const res = await api.sendOtp(cleanNum(phone));
       setIsNew(Boolean(res?.isNew));
       setStep('code');
-      setLeft(60);
+      setLeft(120);
     } catch (x) {
       setErr(x.message);
     }
@@ -47,7 +53,7 @@ export default function Login() {
     setErr('');
     setBusy(true);
     try {
-      const r = await api.verifyOtp(phone, code);
+      const r = await api.verifyOtp(cleanNum(phone), cleanNum(code));
       if (r?.needsProfile || isNew) {
         setStep('profile');
       } else if (r?.user) {
@@ -112,11 +118,11 @@ export default function Login() {
                   autoComplete="tel"
                   placeholder="۰۹۱۲۳۴۵۶۷۸۹"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
+                  onChange={(e) => setPhone(cleanNum(e.target.value))}
                   autoFocus
                 />
               </Field>
-              <Button size="lg" block loading={busy} type="submit" disabled={phone.length < 10}>
+              <Button size="lg" block loading={busy} type="submit" disabled={cleanNum(phone).length < 10}>
                 دریافت کد تأیید
               </Button>
             </form>
@@ -127,7 +133,7 @@ export default function Login() {
               <p className="muted">
                 کد ۵ رقمی ارسال‌شده به شماره‌ی <b className="ltr-inline">{phone}</b> را وارد کنید.
               </p>
-              <Field label="کد تأیید" error={err} hint="کد تایید برای تست: ۱۲۳۴۵">
+              <Field label="کد تأیید" error={err} hint="کد ۵ رقمی پیامک‌شده را وارد کنید (کد تستی سریع: ۱۲۳۴۵)">
                 <input
                   className="input ltr otp"
                   inputMode="numeric"
@@ -135,11 +141,11 @@ export default function Login() {
                   maxLength={5}
                   placeholder="•••••"
                   value={code}
-                  onChange={(e) => setCode(e.target.value)}
+                  onChange={(e) => setCode(cleanNum(e.target.value))}
                   autoFocus
                 />
               </Field>
-              <Button size="lg" block loading={busy} type="submit" disabled={code.length < 5}>
+              <Button size="lg" block loading={busy} type="submit" disabled={cleanNum(code).length < 5}>
                 تأیید و ادامه
               </Button>
               <div className="row between">

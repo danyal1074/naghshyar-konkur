@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { db, initDb } from './db.js';
 import { SUBJECTS, PLANS, TEMPLATES, FIELDS } from './seedData.js';
 import { askGeminiChat, generateGeminiQuestions } from './gemini.js';
+import { sendOtpSms, getSmsConfig } from './sms.js';
 
 initDb();
 
@@ -30,23 +31,101 @@ function authRequired(req, res, next) {
 
 const uid = (p) => `${p}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
+function normalizePhone(p) {
+  if (!p) return '';
+  let clean = String(p)
+    .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+    .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    .replace(/\s+/g, '')
+    .trim();
+  if (clean.startsWith('+98')) clean = '0' + clean.slice(3);
+  if (clean.startsWith('98')) clean = '0' + clean.slice(2);
+  return clean;
+}
+
+function normalizeCode(c) {
+  if (!c) return '';
+  return String(c)
+    .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+    .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    .replace(/\s+/g, '')
+    .trim();
+}
+
 // ── Auth Endpoints ──
-app.post('/api/auth/otp', (req, res) => {
+app.post('/api/auth/otp', async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ message: 'شماره موبایل را وارد کنید.' });
-  const cleanPhone = String(phone).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).trim();
+  const cleanPhone = normalizePhone(phone);
   if (!/^09\d{9}$/.test(cleanPhone)) {
     return res.status(400).json({ message: 'شماره موبایل ۱۱ رقمی معتبر وارد کنید (مثال: ۰۹۱۲۳۴۵۶۷۸۹).' });
   }
+
+  // Rate Limiting: 60s cooldown per number
+  const existingOtp = db.prepare('SELECT * FROM otps WHERE phone = ?').get(cleanPhone);
+  const now = Date.now();
+  if (existingOtp && now - existingOtp.created_at < 60000) {
+    const remainSec = Math.ceil((60000 - (now - existingOtp.created_at)) / 1000);
+    return res.status(429).json({ message: `لطفاً ${remainSec} ثانیه دیگر جهت درخواست مجدد کد تایید صبر کنید.` });
+  }
+
+  // Generate 5-digit code
+  const code = String(Math.floor(10000 + Math.random() * 90000));
+  const expiresAt = now + (2 * 60 * 1000); // 2 minutes expiry
+
+  db.prepare(`
+    INSERT OR REPLACE INTO otps (phone, code, expires_at, attempts, created_at)
+    VALUES (?, ?, ?, 0, ?)
+  `).run(cleanPhone, code, expiresAt, now);
+
   const u = db.prepare('SELECT * FROM users WHERE phone = ?').get(cleanPhone);
-  // Send OTP (in dev/demo, code is 12345)
-  res.json({ ok: true, isNew: !u });
+
+  // Send real SMS
+  const smsRes = await sendOtpSms(cleanPhone, code);
+
+  res.json({
+    ok: true,
+    isNew: !u,
+    message: smsRes.message || 'کد تأیید ارسال شد.',
+  });
 });
 
 app.post('/api/auth/verify', (req, res) => {
   const { phone, code, name, role, field } = req.body;
-  const cleanPhone = String(phone).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).trim();
-  if (code !== '12345') return res.status(400).json({ message: 'کد تأیید نادرست است. (کد نمونه: ۱۲۳۴۵)' });
+  const cleanPhone = normalizePhone(phone);
+  const cleanCode = normalizeCode(code);
+
+  if (!cleanPhone || !cleanCode) {
+    return res.status(400).json({ message: 'شماره موبایل و کد تایید الزامی هستند.' });
+  }
+
+  // Check demo fallback code '12345'
+  const isDemoCode = cleanCode === '12345';
+
+  if (!isDemoCode) {
+    const otpRow = db.prepare('SELECT * FROM otps WHERE phone = ?').get(cleanPhone);
+    if (!otpRow) {
+      return res.status(400).json({ message: 'کد تأیید برای این شماره یافت نشد یا منقضی شده است. لطفاً دوباره درخواست دهید.' });
+    }
+
+    if (Date.now() > otpRow.expires_at) {
+      db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
+      return res.status(400).json({ message: 'کد تأیید منقضی شده است (اعتبار ۲ دقیقه). لطفاً کد جدید دریافت کنید.' });
+    }
+
+    if (otpRow.attempts >= 5) {
+      db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
+      return res.status(400).json({ message: 'تعداد دفعات ورود اشتباه بیش از حد مجاز بود. لطفاً کد جدید دریافت کنید.' });
+    }
+
+    if (otpRow.code !== cleanCode) {
+      db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE phone = ?').run(cleanPhone);
+      return res.status(400).json({ message: 'کد تأیید واردشده نادرست است.' });
+    }
+
+    // Success: remove used OTP
+    db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
+  }
 
   let u = db.prepare('SELECT * FROM users WHERE phone = ?').get(cleanPhone);
   if (!u) {
@@ -894,6 +973,28 @@ app.get('/api/admin/stats', authRequired, (req, res) => {
     monthlyRevenue,
     questions: db.prepare('SELECT COUNT(*) as c FROM questions').get().c,
   });
+});
+
+app.get('/api/admin/settings/sms', authRequired, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ message: 'دسترسی فقط برای مدیر سامانه مجاز است.' });
+  const cfg = getSmsConfig();
+  res.json({
+    apiKeyMasked: cfg.apiKey ? `${cfg.apiKey.slice(0, 6)}...${cfg.apiKey.slice(-4)}` : '',
+    hasApiKey: Boolean(cfg.apiKey),
+    templateId: cfg.templateId || '',
+  });
+});
+
+app.post('/api/admin/settings/sms', authRequired, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ message: 'دسترسی فقط برای مدیر سامانه مجاز است.' });
+  const { apiKey, templateId } = req.body;
+  if (apiKey) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sms_api_key', ?)").run(apiKey.trim());
+  }
+  if (templateId !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sms_template_id', ?)").run(String(templateId).trim());
+  }
+  res.json({ ok: true, message: 'تنظیمات پیامک با موفقیت ذخیره شد.' });
 });
 
 app.get('/api/admin/counselors', authRequired, (req, res) => {
