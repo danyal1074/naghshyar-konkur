@@ -3,7 +3,7 @@ import { db } from './db.js';
 
 export function getSmsConfig() {
   let apiKey = process.env.SMS_IR_API_KEY || '';
-  let templateId = process.env.SMS_IR_TEMPLATE_ID || null;
+  let templateId = process.env.SMS_IR_TEMPLATE_ID || '822360';
 
   try {
     const rowKey = db.prepare("SELECT value FROM settings WHERE key = 'sms_api_key'").get();
@@ -47,7 +47,7 @@ export async function sendOtpSms(mobile, code, customTemplateId = null) {
           templateId: Number(activeTemplateId),
           parameters: [
             {
-              name: 'Code',
+              name: 'CODE',
               value: String(code),
             },
           ],
@@ -67,12 +67,10 @@ export async function sendOtpSms(mobile, code, customTemplateId = null) {
     }
   }
 
-  // If template is not yet registered:
-  console.log(`[SMS.IR] TemplateId not configured yet. Code for ${cleanPhone} is ${code}. Please register a template in sms.ir panel.`);
+  console.warn(`[SMS.IR] TemplateId is not configured. OTP was not sent to ${cleanPhone}.`);
   return {
-    success: true,
+    success: false,
     method: 'dev_mock',
-    message: 'کد تایید آماده شد. برای ارسال پیامک زنده به بلک‌لیست مخابرات، شناسه قالب را در پنل sms.ir ایجاد و در سیستم ثبت کنید.',
-    code: code,
+    error: 'ارسال پیامک فعال نیست. شناسه قالب را در پنل مدیر ثبت کنید.',
   };
 }
