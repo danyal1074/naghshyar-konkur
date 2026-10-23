@@ -18,10 +18,29 @@ except ImportError:
     import paramiko
 
 # ── Server Configuration ──
-HOST = '89.46.217.44'
-USER = 'root'
-PASS = 'c6khenbR98FpxqnM'
+# Login lives in .env.deploy (gitignored) or in the environment. Never commit it.
+def load_secret(name):
+    value = os.environ.get(name, '').strip()
+    if value:
+        return value
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env.deploy')
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, raw = line.split('=', 1)
+                if key.strip() == name:
+                    return raw.strip().strip('"').strip("'")
+    return ''
+
+HOST = load_secret('HONAR_SSH_HOST')
+USER = load_secret('HONAR_SSH_USER')
+PASS = load_secret('HONAR_SSH_PASSWORD')
 REMOTE_DIR = '/var/www/honar'
+if not HOST or not USER or not PASS:
+    raise SystemExit('Deploy credentials are missing. Add HONAR_SSH_HOST, HONAR_SSH_USER, and HONAR_SSH_PASSWORD to .env.deploy. That file stays out of git.')
 
 def log(msg):
     print(f"[DEPLOY] {msg}", flush=True)
@@ -82,7 +101,7 @@ def deploy(skip_build=False, backend_only=False, frontend_only=False):
     # 1. Upload Backend Files
     if not frontend_only:
         log("Uploading backend files (server.js, sms.js, db.js, gemini.js, etc.)...")
-        server_files = ['server.js', 'sms.js', 'db.js', 'gemini.js', 'seedData.js', 'package.json']
+        server_files = ['server.js', 'sms.js', 'db.js', 'gemini.js', 'seedData.js', 'access.js', 'package.json']
         for sf in server_files:
             local_p = os.path.join('server', sf)
             if os.path.exists(local_p):

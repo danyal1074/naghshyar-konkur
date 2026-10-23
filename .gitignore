@@ -13,6 +13,7 @@ npm-debug.log*
 # Environment and DB files
 .env
 .env.*
+.env.deploy
 *.db
 *.db-shm
 *.db-wal
