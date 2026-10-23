@@ -1,0 +1,59 @@
+# Cursor Agent Rules & Project Guide — نقش‌یار (سامانه هوشمند کنکور هنر)
+
+## ۱. هویت و معماری پروژه (Project Identity & Architecture)
+- **نام سامانه:** نقش‌یار (سامانه برنامه‌ریزی، آزمون‌ساز و مشاوره کنکور هنر)
+- **دامنه زنده:** https://honar.digiral.ir
+- **مخزن گیت‌هاب:** https://github.com/danyal1074/naghshyar-konkur.git (شاخه `main`)
+- **ساختار سورس‌کد:**
+  - `naghshyar-source/naghshyar/`: فرانت‌اند ری‌اکت و وایت (React + Vite, React Router, CSS Variables)
+  - `server/`: بک‌اند Node.js Express + دیتابیس بومی SQLite (`node:sqlite DatabaseSync`) به نام `naghshyar.db`
+  - `naghshyar-demo-build/`: خروجی بیلد آماده که روی وب‌سرور Nginx برای دامنه honar سرو می‌شود.
+
+---
+
+## ۲. قانون طلایی و ایمنی سرور (CRITICAL INVARIANT — DO NOT VIOLATE)
+> [!CAUTION]
+> روی همین سرور VPS، پروژه مهم دیگری به نام **رادار خودرو** با دامنه `radar.digiral.ir` و پروسه‌های پس‌زمینه PM2 زیر در حال اجراست:
+> - `radar-web`
+> - `radar-scheduler`
+> - `bale-bot`
+> - `rubika-bot`
+> 
+> **شما هرگز نباید:**
+> 1. از دستوراتی مثل `pm2 kill` یا `pm2 restart all` یا ریست سرور استفاده کنید.
+> 2. فایل‌های خارج از مسیر `/var/www/honar` یا کانفیگ nginx پروژه رادار (`/etc/nginx/sites-available/radar*`) را تغییر دهید.
+> 
+> **تنها پروسه مجاز برای ری‌استارت:** `pm2 reload honar` یا `pm2 restart honar`.
+
+---
+
+## ۳. مشخصات سرور VPS و استقرار (VPS Credentials & Deployment)
+- **آی‌پی سرور (Host):** `89.46.217.44`
+- **نام کاربری (User):** `root`
+- **رمز عبور (Password):** `c6khenbR98FpxqnM`
+- **مسیر پروژه روی سرور:** `/var/www/honar/`
+- **اسکریپت خودکار استقرار تک‌دستوری:**
+  هر زمان تغییری دادی، فقط دستور زیر را در ترمینال اجرا کن:
+  ```bash
+  python deploy.py
+  ```
+  این اسکریپت بیلد فرانت‌اند را می‌سازد، فایل‌های تغییر یافته را با SFTP منتقل می‌کند، پروسه `honar` را ری‌استارت کرده و وضعیت سایت را تست می‌کند.
+
+---
+
+## ۴. چرخه گیت و محافظت از کلیدها (Git & Push Protection)
+- گیت‌هاب دارای **Push Protection** است؛ هرگز هیچ API Key یا توکن خامی را مستقیماً در سورس فایل‌های گیت کامیت نکنید.
+- کلیدهای محرمانه را در متغیرهای محیطی یا جدول `settings` دیتابیس SQLite ثبت کنید.
+- قبل از پوش، با `git status` و `git diff` بررسی کنید.
+
+---
+
+## ۵. بخش‌های کلیدی فنی (Key Technical Systems)
+1. **احراز هویت پیامکی (SMS OTP):**
+   - سامانه `sms.ir` با کلید ذخیره شده در دیتابیس و ماژول `server/sms.js`.
+   - پس از تایید شماره در پنل sms.ir، شناسه قالب (Template ID) در اندپوینت `/api/admin/settings/sms` یا پنل مدیر (`/#/a`) ثبت می‌شود.
+   - کد نمونه تستی برای حالت دمو: `12345`.
+2. **هوش مصنوعی دستیار درسی و آزمون‌ساز:**
+   - فایل `server/gemini.js` به همراه موتور فال‌بک ضدتحریم Pollinations AI بدون فیلتر در ایران کار می‌کند.
+3. **فایل‌های تمرین عملی دانش‌آموزان:**
+   - فایل‌ها در سرور در پوشه `/var/www/honar/server/uploads/` ذخیره شده و از طریق مسیر استاتیک `/uploads/*` سرو می‌شوند.
