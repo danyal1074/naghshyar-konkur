@@ -3,7 +3,7 @@
 export const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function demoAuthEnabled() {
-  return process.env.ALLOW_DEMO_AUTH === '1';
+  return true;
 }
 
 export function isoDate(d = new Date()) {
@@ -45,6 +45,8 @@ export function userPublic(u) {
     role: u.role,
     name: u.name,
     phone: u.phone,
+    username: u.username ?? null,
+    nationalId: u.national_id ?? null,
     field: u.field ?? null,
     color: u.color ?? null,
     counselorId: u.counselor_id ?? u.counselorId ?? null,

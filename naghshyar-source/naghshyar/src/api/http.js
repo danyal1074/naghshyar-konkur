@@ -32,6 +32,16 @@ const qs = (o = {}) => {
 };
 
 // ── Auth ──
+export const login = async (identifier, password) => {
+  const r = await req('POST', '/auth/login', { identifier, password });
+  if (r.token) localStorage.setItem(TOKEN_KEY, r.token);
+  return r;
+};
+export const register = async (data) => {
+  const r = await req('POST', '/auth/register', data);
+  if (r.token) localStorage.setItem(TOKEN_KEY, r.token);
+  return r;
+};
 export const sendOtp = (phone) => req('POST', '/auth/otp', { phone });
 export const verifyOtp = async (phone, code, profile = {}) => {
   const r = await req('POST', '/auth/verify', { phone, code, ...profile });

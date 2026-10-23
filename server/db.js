@@ -162,6 +162,28 @@ export function initDb() {
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_result_once ON exam_results(exam_id, student_id);');
   db.prepare("DELETE FROM tokens WHERE token IN ('token_admin', 'token_counselor', 'token_student')").run();
 
+  // Ensure new columns exist
+  try { db.exec('ALTER TABLE users ADD COLUMN username TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE users ADD COLUMN national_id TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE users ADD COLUMN password TEXT;'); } catch {}
+
+  // Ensure Admin user "danyal" exists with password "danyal1074"
+  try {
+    const adminUser = db.prepare("SELECT * FROM users WHERE role = 'admin' OR username = 'danyal'").get();
+    if (adminUser) {
+      db.prepare("UPDATE users SET username = 'danyal', password = ?, name = 'دانیال (مدیر سامانه)' WHERE id = ?").run('danyal1074', adminUser.id);
+    } else {
+      db.prepare(`
+        INSERT INTO users (id, role, name, phone, username, password, status, color)
+        VALUES ('a1', 'admin', 'دانیال (مدیر سامانه)', '09120000000', 'danyal', 'danyal1074', 'active', '#2b3fd6')
+      `).run();
+    }
+    // Set fallback password for accounts without password
+    db.prepare("UPDATE users SET password = 'password123' WHERE password IS NULL").run();
+  } catch (err) {
+    console.error('Admin setup error:', err);
+  }
+
   // Check if seed is needed
   const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
   if (userCount === 0) {

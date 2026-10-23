@@ -687,6 +687,10 @@ button.list-row:hover, a.list-row:hover { border-color: var(--lapis); }
 .login-form { display: grid; place-items: center; padding: 24px 16px; }
 .login-box { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 18px; }
 .login-mobile-brand { display: none; }
+.login-tabs { display: flex; background: var(--bg-soft, #f1f3f7); border-radius: 12px; padding: 4px; gap: 4px; }
+.login-tab { flex: 1; padding: 10px 12px; border-radius: 8px; border: none; background: transparent; font-size: 0.92rem; font-weight: 600; color: var(--ink-2, #555); cursor: pointer; transition: all 0.18s ease; text-align: center; }
+.login-tab.active { background: #fff; color: var(--lapis, #2b3fd6); font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+.admin-hint-box { display: flex; align-items: center; gap: 8px; background: rgba(31, 138, 112, 0.08); border: 1px dashed rgba(31, 138, 112, 0.4); padding: 10px 12px; border-radius: 10px; font-size: 0.82rem; color: #156652; line-height: 1.4; }
 .demo-box { border-top: 1px solid var(--line); padding-top: 18px; display: flex; flex-direction: column; gap: 10px; }
 .demo-box h3 { font-size: .9rem; color: var(--ink-3); font-weight: 600; }
 .demo-btn { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; border: 1.5px solid var(--line); background: #fff; text-align: start; font-weight: 700; }

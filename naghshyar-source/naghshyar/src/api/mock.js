@@ -139,6 +139,18 @@ export const verifyOtp = (phone, code) => {
   localStorage.setItem(SESSION, u.id);
   return wait({ token: 'demo-token', user: pub(u) });
 };
+export const login = (identifier, password) => {
+  const u = db.users.find((x) => x.phone === identifier || x.id === identifier || x.username === identifier) || db.users[0];
+  localStorage.setItem(SESSION, u.id);
+  return wait({ token: 'mock-token', user: pub(u) });
+};
+export const register = (data) => {
+  const id = nid('s');
+  const u = { id, role: data.role || 'student', name: data.name, phone: data.phone, field: data.field || 'گرافیک', color: '#2b3fd6', status: 'active' };
+  db.users.push(u);
+  localStorage.setItem(SESSION, id);
+  return wait({ token: 'mock-token', user: pub(u) });
+};
 export const demoLogin = (role) => {
   const id = { student: 's1', counselor: 'c1', admin: 'a1' }[role];
   localStorage.setItem(SESSION, id);
