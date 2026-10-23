@@ -65,12 +65,21 @@ export default function Landing() {
   const nav = useNavigate();
   const { user, setUser } = useAuth();
   const { data: plans } = useAsync(() => api.listPlans(), []);
-  const { data: statsData } = useAsync(() => api.getAdminStats().catch(() => null), []);
+  const { data: statsData } = useAsync(() => api.getPublicStats().catch(() => null), []);
+  const [demoLoading, setDemoLoading] = useState('');
 
-  const demo = async (role) => {
-    const r = await api.demoLogin(role);
-    setUser(r.user);
-    nav(homeFor(role));
+  const enterDemo = async (role) => {
+    setDemoLoading(role);
+    try {
+      const r = await api.demoLogin(role);
+      if (r?.user) {
+        setUser(r.user);
+        nav(homeFor(r.user.role));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setDemoLoading('');
   };
 
   const days = daysToKonkur();
@@ -81,6 +90,7 @@ export default function Landing() {
       <header className="land-top">
         <Brand />
         <nav className="land-nav">
+          <a href="#demo" className="land-nav-link land-nav-demo">🎮 تست دموی سامانه</a>
           <a href="#features" className="land-nav-link">امکانات</a>
           <a href="#plans" className="land-nav-link">اشتراک</a>
           <a href="#faq" className="land-nav-link">سؤالات متداول</a>
@@ -89,7 +99,10 @@ export default function Landing() {
         {user ? (
           <Button variant="soft" onClick={() => nav(homeFor(user.role))}>ورود به پنل</Button>
         ) : (
-          <Link to="/login" className="btn btn-primary">ورود / ثبت‌نام</Link>
+          <div className="row" style={{ gap: '8px' }}>
+            <a href="#demo" className="btn btn-soft btn-sm" style={{ fontWeight: 700 }}>تست دمو</a>
+            <Link to="/login" className="btn btn-primary">ورود / ثبت‌نام</Link>
+          </div>
         )}
       </header>
 
@@ -109,11 +122,11 @@ export default function Landing() {
             مشاور برنامه می‌نویسد، دانش‌آموز تیک می‌زند، آزمون همان بخش خودکار ساخته می‌شود و ضعف‌ها پیش از روز کنکور پیدا می‌شوند.
           </p>
           <div className="hero-ctas">
-            <Link to="/login" className="btn btn-light btn-lg">
-              <Icon name="next" size={20} />
-              شروع رایگان ۱۴ روزه
-            </Link>
-            <Button size="lg" variant="outline-light" onClick={() => demo('student')}>دیدن دموی سامانه</Button>
+            <a href="#demo" className="btn btn-light btn-lg">
+              <Icon name="eye" size={20} />
+              تست دموی سامانه (بدون ثبت‌نام)
+            </a>
+            <Link to="/login" className="btn btn-outline-light btn-lg">ورود با شماره موبایل</Link>
           </div>
         </div>
 
@@ -185,6 +198,118 @@ export default function Landing() {
           </div>
         </section>
       </Reveal>
+
+      {/* ── Interactive Demo Playground ── */}
+      <section className="land-sec demo-section" id="demo">
+        <Reveal>
+          <div className="demo-section-head">
+            <span className="demo-badge-pill">⚡ محیط آزمایشی و زنده</span>
+            <h2 className="sec-heading">فضای سامانه را بدون ثبت‌نام تست کنید</h2>
+            <p className="sec-sub">
+              نقش مورد نظر خود را انتخاب کنید تا بلافاصله با یک کلیک وارد پنل آزمایشی شوید و تمامی امکانات را از نزدیک امتحان کنید:
+            </p>
+          </div>
+        </Reveal>
+
+        <div className="demo-grid">
+          <Reveal delay={50}>
+            <div className="demo-card demo-card-student">
+              <div className="demo-card-top">
+                <span className="demo-role-icon student">
+                  <Icon name="home" size={26} />
+                </span>
+                <div>
+                  <h3>پنل دانش‌آموز</h3>
+                  <small>حساب نمونه: سارا کریمی (رشته گرافیک)</small>
+                </div>
+              </div>
+              <p className="demo-card-desc">
+                محیط اختصاصی داوطلب کنکور هنر با تمرکز بر اجرای برنامه، آزمون‌های مبحثی و رفع اشکال.
+              </p>
+              <ul className="demo-perks">
+                <li><Icon name="check" size={16} stroke={3} /><span>صفحه «امروز» و ثبت تیک مطالعه و ساعت درس‌ها</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>شرکت در آزمون تستی با زمان‌سنج و نمره منفی</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>دستیار هوش مصنوعی برای پاسخ به سؤالات تئوری هنر</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>گفتگوی آنلاین با مشاور و ارسال کارهای عملی طراحی</span></li>
+              </ul>
+              <Button
+                size="lg"
+                variant="primary"
+                className="demo-btn-student"
+                loading={demoLoading === 'student'}
+                onClick={() => enterDemo('student')}
+              >
+                ورود به دموی دانش‌آموز ←
+              </Button>
+            </div>
+          </Reveal>
+
+          <Reveal delay={150}>
+            <div className="demo-card demo-card-counselor hot">
+              <div className="demo-card-ribbon">محبوب‌ترین</div>
+              <div className="demo-card-top">
+                <span className="demo-role-icon counselor">
+                  <Icon name="users" size={26} />
+                </span>
+                <div>
+                  <h3>پنل مشاور کنکور</h3>
+                  <small>حساب نمونه: مریم احمدی (مشاور ارشد)</small>
+                </div>
+              </div>
+              <p className="demo-card-desc">
+                میز کار کامل مشاور جهت برنامه‌ریزی هفتگی، آزمون‌سازی هوشمند و ارزیابی دانش‌آموزان.
+              </p>
+              <ul className="demo-perks">
+                <li><Icon name="check" size={16} stroke={3} /><span>آزمون‌ساز سه‌مرحله‌ای با پیشنهاد هوش مصنوعی</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>مدیریت برنامه‌ریزی هفتگی و قالب‌های آماده</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>گزارش آماری دقیق از کارنامه‌ها و مباحث ضعیف</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>بررسی و نمره‌دهی به تمرین‌های طراحی و نقاشی</span></li>
+              </ul>
+              <Button
+                size="lg"
+                variant="primary"
+                className="demo-btn-counselor"
+                loading={demoLoading === 'counselor'}
+                onClick={() => enterDemo('counselor')}
+              >
+                ورود به دموی مشاور ←
+              </Button>
+            </div>
+          </Reveal>
+
+          <Reveal delay={250}>
+            <div className="demo-card demo-card-admin">
+              <div className="demo-card-top">
+                <span className="demo-role-icon admin">
+                  <Icon name="chart" size={26} />
+                </span>
+                <div>
+                  <h3>پنل مدیریت سامانه</h3>
+                  <small>حساب نمونه: مدیر نقش‌یار</small>
+                </div>
+              </div>
+              <p className="demo-card-desc">
+                داشبورد مدیریتی جهت نظارت بر اشتراک‌ها، مشاوران و تنظیمات کلان سیستم.
+              </p>
+              <ul className="demo-perks">
+                <li><Icon name="check" size={16} stroke={3} /><span>نمای کلی سیستم، تعداد آزمون‌ها و درآمد ماهانه</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>مدیریت مشاوران و وضعیت اشتراک‌ها</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>پیکربندی هوش مصنوعی و وب‌سرویس پیامکی</span></li>
+                <li><Icon name="check" size={16} stroke={3} /><span>پایش کلیه آزمون‌ها و بانک سؤالات</span></li>
+              </ul>
+              <Button
+                size="lg"
+                variant="primary"
+                className="demo-btn-admin"
+                loading={demoLoading === 'admin'}
+                onClick={() => enterDemo('admin')}
+              >
+                ورود به دموی مدیر ←
+              </Button>
+            </div>
+          </Reveal>
+        </div>
+      </section>
 
       {/* ── Cycle / Timeline ── */}
       <section className="land-sec" id="features">

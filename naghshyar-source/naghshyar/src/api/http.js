@@ -42,7 +42,11 @@ export const me = async () => {
   if (!localStorage.getItem(TOKEN_KEY)) return null;
   try { return await req('GET', '/me'); } catch { localStorage.removeItem(TOKEN_KEY); return null; }
 };
-export const logout = async () => { localStorage.removeItem(TOKEN_KEY); return { ok: true }; };
+export const logout = async () => {
+  try { await req('POST', '/auth/logout'); } catch { /* token may already be gone */ }
+  localStorage.removeItem(TOKEN_KEY);
+  return { ok: true };
+};
 export const demoLogin = async (role) => {
   const r = await req('POST', '/auth/demo-login', { role });
   localStorage.setItem(TOKEN_KEY, r.token);
@@ -112,5 +116,6 @@ export const listCounselors = () => req('GET', '/admin/counselors');
 export const updateCounselor = (id, patch) => req('PATCH', `/admin/counselors/${id}`, patch);
 export const createCounselor = (data) => req('POST', '/admin/counselors', data);
 export const getAdminStats = () => req('GET', '/admin/stats');
+export const getPublicStats = () => req('GET', '/public/stats');
 export const getSmsSettings = () => req('GET', '/admin/settings/sms');
 export const saveSmsSettings = (data) => req('POST', '/admin/settings/sms', data);

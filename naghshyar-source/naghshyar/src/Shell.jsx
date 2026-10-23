@@ -122,11 +122,12 @@ function UserMenu() {
               <small>{ROLE_LABEL[user.role]}{user.field ? ` · ${user.field}` : ''}</small>
             </div>
           </div>
-            <p className="menu-title">جابجایی بین نقش‌ها برای تست</p>
-            {['student', 'counselor', 'admin'].filter((r) => r !== user.role).map((r) => (
-              <button key={r} className="menu-item" onClick={() => switchTo(r)}><Icon name="eye" size={18} />ورود به‌عنوان {ROLE_LABEL[r]}</button>
-            ))}
-            <hr />
+          {/* Role switcher for testing & demo */}
+          <p className="menu-title">جابجایی بین نقش‌ها برای تست دمو</p>
+          {['student', 'counselor', 'admin'].filter((r) => r !== user.role).map((r) => (
+            <button key={r} className="menu-item" onClick={() => switchTo(r)}><Icon name="eye" size={18} />ورود به‌عنوان {ROLE_LABEL[r]}</button>
+          ))}
+          <hr />
           <button className="menu-item" onClick={async () => { await logout(); nav('/'); }}><Icon name="logout" size={18} />خروج</button>
         </div>
       )}
@@ -138,9 +139,25 @@ export default function Shell({ role }) {
   const items = NAV[role];
   const [more, setMore] = useState(false);
   const loc = useLocation();
+  const nav = useNavigate();
+  const { user, setUser, logout } = useAuth();
   useEffect(() => { setMore(false); window.scrollTo(0, 0); }, [loc.pathname]);
   const barItems = items.filter((i) => i.bar);
   const moreItems = items.filter((i) => !i.bar);
+
+  const isDemo = user && (user.phone?.startsWith('0912000') || ['s1', 'c1', 'admin'].includes(user.id));
+  const switchTo = async (targetRole) => {
+    try {
+      const r = await api.demoLogin(targetRole);
+      if (r?.user) {
+        setUser(r.user);
+        nav(homeFor(targetRole));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   return (
     <div className="shell">
       <aside className="side">
@@ -155,6 +172,28 @@ export default function Shell({ role }) {
         </nav>
       </aside>
       <div className="main-col">
+        {isDemo && (
+          <aside className="demo-top-strip" aria-label="حالت دمو">
+            <div className="demo-strip-inner">
+              <div className="demo-strip-info">
+                <span className="demo-strip-pulse" />
+                <b>حالت دموی سامانه:</b>
+                <span>در حال مشاهده پنل <b>{ROLE_LABEL[role]}</b></span>
+              </div>
+              <div className="demo-strip-actions">
+                <span className="demo-strip-lbl">سوییچ سریع:</span>
+                {['student', 'counselor', 'admin'].filter((r) => r !== role).map((r) => (
+                  <button key={r} type="button" className="demo-pill-btn" onClick={() => switchTo(r)}>
+                    {ROLE_LABEL[r]}
+                  </button>
+                ))}
+                <button type="button" className="demo-pill-exit" onClick={async () => { await logout(); nav('/login'); }}>
+                  ورود اصلی
+                </button>
+              </div>
+            </div>
+          </aside>
+        )}
         <header className="topbar">
           <NavLink to={homeFor(role)} className="topbar-brand"><Brand small /></NavLink>
           <div className="grow" />

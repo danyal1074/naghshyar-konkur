@@ -488,6 +488,12 @@ export const createCounselor = ({ name, phone, plan }) => {
   persist();
   return wait(pub(c));
 };
+export const getPublicStats = () => wait({
+  counselors: db.users.filter((u) => u.role === 'counselor' && u.status !== 'suspended').length,
+  students: db.users.filter((u) => u.role === 'student').length,
+  exams: db.exams.length,
+  questions: db.questions.length,
+});
 export const getAdminStats = () => {
   const counselors = db.users.filter((u) => u.role === 'counselor');
   const active = counselors.filter((c) => c.status === 'active');

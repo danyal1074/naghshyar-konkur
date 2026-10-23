@@ -558,6 +558,46 @@ button.list-row:hover, a.list-row:hover { border-color: var(--lapis); }
 .land-sec { display: flex; flex-direction: column; gap: 28px; padding: 56px 0; }
 .alt-bg { background: #faf9f6; margin-inline: -16px; padding-inline: 32px; border-radius: 0; }
 
+/* ── Interactive Demo Playground ── */
+.demo-section { padding-top: 10px; }
+.demo-section-head { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 24px; }
+.demo-badge-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 14px; border-radius: 99px; background: var(--ochre-l); color: #8a6000; font-weight: 700; font-size: .85rem; border: 1px solid var(--ochre); }
+.demo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 24px; }
+.demo-card { background: #fff; border: 1.5px solid var(--line); border-radius: 20px; padding: 26px 22px; display: flex; flex-direction: column; gap: 16px; position: relative; transition: all .25s ease; box-shadow: 0 4px 20px rgba(23,25,43,.04); }
+.demo-card:hover { transform: translateY(-5px); box-shadow: 0 12px 32px rgba(23,25,43,.09); }
+.demo-card.hot { border-color: #e5446d; box-shadow: 0 4px 24px rgba(229,68,109,.12); }
+.demo-card-ribbon { position: absolute; top: 16px; inset-inline-end: 16px; background: #e5446d; color: #fff; font-size: .75rem; font-weight: 700; padding: 3px 10px; border-radius: 99px; }
+.demo-card-top { display: flex; align-items: center; gap: 14px; }
+.demo-role-icon { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; color: #fff; flex: none; }
+.demo-role-icon.student { background: #2b3fd6; }
+.demo-role-icon.counselor { background: #e5446d; }
+.demo-role-icon.admin { background: #1f8a70; }
+.demo-card-top h3 { font-size: 1.2rem; margin: 0; }
+.demo-card-top small { color: var(--ink-3); font-size: .82rem; }
+.demo-card-desc { font-size: .9rem; color: var(--ink-2); line-height: 1.7; margin: 0; }
+.demo-perks { display: flex; flex-direction: column; gap: 10px; flex: 1; padding: 0; margin: 0; }
+.demo-perks li { display: flex; align-items: flex-start; gap: 8px; font-size: .88rem; color: var(--ink); line-height: 1.5; }
+.demo-perks li .icon { color: var(--viridian); flex: none; margin-top: 2px; }
+.demo-btn-student { background: #2b3fd6 !important; color: #fff !important; width: 100%; border-radius: 12px; }
+.demo-btn-student:hover { background: #1f2fa8 !important; }
+.demo-btn-counselor { background: #e5446d !important; color: #fff !important; width: 100%; border-radius: 12px; }
+.demo-btn-counselor:hover { background: #c22950 !important; }
+.demo-btn-admin { background: #1f8a70 !important; color: #fff !important; width: 100%; border-radius: 12px; }
+.demo-btn-admin:hover { background: #156652 !important; }
+
+/* ── Top Demo Strip inside panels ── */
+.demo-top-strip { background: linear-gradient(90deg, #17192b, #2b3fd6); color: #fff; padding: 8px 16px; border-bottom: 1px solid rgba(255,255,255,.15); font-size: .88rem; position: sticky; top: 0; z-index: 45; }
+.demo-strip-inner { max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.demo-strip-info { display: flex; align-items: center; gap: 8px; }
+.demo-strip-pulse { width: 10px; height: 10px; border-radius: 50%; background: #e0a526; display: inline-block; animation: pulse-dot 1.8s infinite; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(1.3); } }
+.demo-strip-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.demo-strip-lbl { font-size: .8rem; opacity: .8; margin-inline-end: 2px; }
+.demo-pill-btn { background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.3); color: #fff; padding: 3px 10px; border-radius: 99px; font-size: .8rem; font-weight: 600; cursor: pointer; transition: background .15s; }
+.demo-pill-btn:hover { background: rgba(255,255,255,.32); }
+.demo-pill-exit { background: #e0a526; color: #17192b; border: 0; padding: 3px 12px; border-radius: 99px; font-size: .8rem; font-weight: 700; cursor: pointer; margin-inline-start: 6px; }
+.demo-pill-exit:hover { background: #f0b536; }
+
 /* ── Wave Divider ── */
 .wave-divider { margin: 0 -16px; line-height: 0; }
 .wave-divider svg { width: 100%; height: 50px; display: block; }

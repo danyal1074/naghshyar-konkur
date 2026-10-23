@@ -30,7 +30,7 @@ export function Chat() {
   // If counselor: target is selectedStudentId or first student in thread list
   const activeStudentId = isCounselor
     ? selectedStudentId || threads.data?.[0]?.student?.id
-    : user?.counselorId || 'c1';
+    : user?.counselorId || null;
 
   const [messages, setMessages] = useState([]);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
@@ -165,6 +165,14 @@ export function Chat() {
 
       {/* Main Chat Box */}
       <section className="chat-main">
+        {!isCounselor && !user?.counselorId ? (
+          <div className="empty">
+            <Icon name="chat" size={32} />
+            <p>هنوز مشاوری به حساب شما وصل نشده است.</p>
+            <small className="muted">وقتی مشاور شما را به فهرست شاگردانش اضافه کند، گفتگو اینجا باز می‌شود.</small>
+          </div>
+        ) : (
+        <>
         {/* Chat Header */}
         <header className="chat-head">
           <div className="row">
@@ -180,7 +188,7 @@ export function Chat() {
             )}
             <Avatar user={isCounselor ? currentStudent || { name: 'دانش‌آموز' } : { name: 'مشاور', color: '#1f8a70' }} size={46} />
             <div>
-              <h3>{isCounselor ? (currentStudent?.name || 'انتخاب دانش‌آموز') : 'مشاور کنکور هنر (استاد احمدی)'}</h3>
+              <h3>{isCounselor ? (currentStudent?.name || 'انتخاب دانش‌آموز') : 'مشاور شما'}</h3>
               <p className="muted sm">
                 {isCounselor ? `${currentStudent?.field || ''} · آنلاین` : 'پاسخگویی آنلاین به سوالات درسی و برنامه‌ریزی'}
               </p>
@@ -241,6 +249,8 @@ export function Chat() {
             ارسال
           </Button>
         </footer>
+        </>
+        )}
       </section>
     </div>
   );

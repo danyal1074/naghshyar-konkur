@@ -139,12 +139,28 @@ export function initDb() {
       read INTEGER DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS exam_starts (
+      exam_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      PRIMARY KEY (exam_id, student_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_student_date ON tasks(student_id, date);
     CREATE INDEX IF NOT EXISTS idx_chat_users ON chat_messages(sender_id, receiver_id);
     CREATE INDEX IF NOT EXISTS idx_practice_student ON practice(student_id);
     CREATE INDEX IF NOT EXISTS idx_exam_results_student ON exam_results(student_id);
     CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
   `);
+
+  db.exec(`
+    DELETE FROM exam_results
+    WHERE rowid NOT IN (
+      SELECT MIN(rowid) FROM exam_results GROUP BY exam_id, student_id
+    );
+  `);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_result_once ON exam_results(exam_id, student_id);');
+  db.prepare("DELETE FROM tokens WHERE token IN ('token_admin', 'token_counselor', 'token_student')").run();
 
   // Check if seed is needed
   const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
@@ -215,12 +231,6 @@ function seedInitialData() {
   for (const u of users) {
     insertUser.run(...u);
   }
-
-  // Pre-seed persistent demo auth tokens
-  const insertToken = db.prepare('INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)');
-  insertToken.run('token_admin', 'a1', toISO(now));
-  insertToken.run('token_counselor', 'c1', toISO(now));
-  insertToken.run('token_student', 's1', toISO(now));
 
   // Seed comprehensive question bank for Art Entrance Exam
   const insertQ = db.prepare(`

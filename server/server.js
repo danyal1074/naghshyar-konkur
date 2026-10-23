@@ -1,25 +1,82 @@
 import express from 'express';
 import cors from 'cors';
-import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import { randomBytes, randomInt } from 'node:crypto';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { db, initDb } from './db.js';
 import { SUBJECTS, PLANS, TEMPLATES, FIELDS } from './seedData.js';
 import { askGeminiChat, generateGeminiQuestions } from './gemini.js';
-import { sendOtpSms, getSmsConfig } from './sms.js';
+import { sendOtpSms } from './sms.js';
+import {
+  canAccessStudentRecord,
+  canChatPair,
+  demoAuthEnabled,
+  isoDate,
+  questionPublic,
+  resultPublic,
+  safeJson,
+  taskPublic,
+  tokenFresh,
+  topicLookup,
+  userPublic,
+  weekBounds,
+} from './access.js';
 
 initDb();
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: '20mb' }));
+app.set('trust proxy', 1);
 
-// ── Auth Middleware ──
+const ALLOWED_ORIGINS = new Set([
+  'https://honar.digiral.ir',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:8000',
+  'http://127.0.0.1:8000',
+]);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || ALLOWED_ORIGINS.has(origin)) return callback(null, true);
+    return callback(null, false);
+  },
+}));
+app.use(express.json({ limit: '8mb' }));
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const staticDir = resolve(__dirname, '../naghshyar-demo-build');
+const uploadsDir = resolve(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
+const TOPICS = topicLookup(SUBJECTS);
+const buckets = new Map();
+
+function hitLimit(key, limit, windowMs) {
+  const now = Date.now();
+  const fresh = (buckets.get(key) || []).filter((t) => now - t < windowMs);
+  if (fresh.length >= limit) {
+    buckets.set(key, fresh);
+    return true;
+  }
+  fresh.push(now);
+  buckets.set(key, fresh);
+  return false;
+}
+
 function getUser(req) {
   const auth = req.headers.authorization;
   if (!auth?.startsWith('Bearer ')) return null;
   const token = auth.slice(7).trim();
-  const tokRow = db.prepare('SELECT user_id FROM tokens WHERE token = ?').get(token);
+  if (!token || token.length > 200) return null;
+  const tokRow = db.prepare('SELECT user_id, created_at FROM tokens WHERE token = ?').get(token);
   if (!tokRow) return null;
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(tokRow.user_id) || null;
+  if (!tokenFresh(tokRow.created_at)) {
+    db.prepare('DELETE FROM tokens WHERE token = ?').run(token);
+    return null;
+  }
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(tokRow.user_id);
+  if (!user || user.status === 'suspended') return null;
+  return user;
 }
 
 function authRequired(req, res, next) {
@@ -27,6 +84,13 @@ function authRequired(req, res, next) {
   if (!user) return res.status(401).json({ message: 'لطفاً ابتدا وارد سامانه شوید.' });
   req.user = user;
   next();
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+    next();
+  };
 }
 
 const uid = (p) => `${p}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -39,7 +103,7 @@ function normalizePhone(p) {
     .replace(/\s+/g, '')
     .trim();
   if (clean.startsWith('+98')) clean = '0' + clean.slice(3);
-  if (clean.startsWith('98')) clean = '0' + clean.slice(2);
+  if (clean.startsWith('98') && clean.length === 12) clean = '0' + clean.slice(2);
   return clean;
 }
 
@@ -52,250 +116,350 @@ function normalizeCode(c) {
     .trim();
 }
 
-// ── Auth Endpoints ──
+function smsLive() {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'sms_live'").get();
+  return row?.value === '1';
+}
+
+function issueToken(userId) {
+  const token = `tok_${randomBytes(16).toString('hex')}`;
+  db.prepare('INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)').run(token, userId, new Date().toISOString());
+  return token;
+}
+
+function studentById(id) {
+  return db.prepare("SELECT * FROM users WHERE id = ? AND role = 'student'").get(id);
+}
+
+function ownsStudent(user, studentId) {
+  return canAccessStudentRecord(user, studentById(studentId));
+}
+
+function loadStudent(req, res, rawId) {
+  const id = rawId === 'me' ? req.user.id : rawId;
+  const student = studentById(id);
+  if (!student) {
+    res.status(404).json({ message: 'دانش‌آموز یافت نشد.' });
+    return null;
+  }
+  if (!canAccessStudentRecord(req.user, student)) {
+    res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+    return null;
+  }
+  return student;
+}
+
+function loadTask(req, res, taskId) {
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  if (!task) {
+    res.status(404).json({ message: 'کار پیدا نشد.' });
+    return null;
+  }
+  if (!ownsStudent(req.user, task.student_id)) {
+    res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+    return null;
+  }
+  return task;
+}
+
+function validDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || '');
+}
+
+function audienceOf(exam) {
+  return safeJson(exam.student_ids, []);
+}
+
+function studentCanTake(user, exam) {
+  if (user.role !== 'student') return false;
+  const ids = audienceOf(exam);
+  return !ids.length || ids.includes('*') || ids.includes('all') || ids.includes(user.id);
+}
+
+function counselorOwnsExam(user, exam) {
+  return user.role === 'admin' || (user.role === 'counselor' && exam.created_by === user.id);
+}
+
+function loadQuestions(ids, hideAnswer) {
+  return ids.map((qid) => {
+    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
+    return q ? questionPublic(q, hideAnswer) : null;
+  }).filter(Boolean);
+}
+
+function studentStats(s) {
+  const today = isoDate();
+  const { start, end } = weekBounds();
+  const tasks = db.prepare('SELECT done, date FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').all(s.id, start, end);
+  const past = tasks.filter((t) => t.date <= today);
+  const pastDone = past.filter((t) => t.done).length;
+  const pastRate = past.length ? pastDone / past.length : null;
+  let status = 'good';
+  if (!tasks.length) status = 'noplan';
+  else if (pastRate !== null) status = pastRate >= 0.7 ? 'good' : pastRate >= 0.4 ? 'warn' : 'late';
+  const results = db.prepare('SELECT percent FROM exam_results WHERE student_id = ?').all(s.id);
+  const avgScore = results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null;
+  const last = db.prepare('SELECT date FROM study_sessions WHERE student_id = ? ORDER BY date DESC LIMIT 1').get(s.id);
+  const exams = db.prepare('SELECT id, student_ids FROM exams').all();
+  let pendingExams = 0;
+  for (const exam of exams) {
+    const ids = safeJson(exam.student_ids, []);
+    const eligible = !ids.length || ids.includes('*') || ids.includes('all') || ids.includes(s.id);
+    if (!eligible) continue;
+    const done = db.prepare('SELECT id FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, s.id);
+    if (!done) pendingExams++;
+  }
+  return {
+    ...userPublic(s),
+    weekDone: tasks.filter((t) => t.done).length,
+    weekTotal: tasks.length,
+    pastRate,
+    lastActive: last?.date || null,
+    avgScore,
+    status,
+    pendingExams,
+  };
+}
+
+function shiftDate(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + days);
+  return isoDate(date);
+}
+
+function setTaskDone(task, done) {
+  db.prepare('UPDATE tasks SET done = ? WHERE id = ?').run(done ? 1 : 0, task.id);
+  if (done && task.type !== 'test') {
+    const existing = db.prepare('SELECT id FROM study_sessions WHERE task_id = ? AND auto = 1').get(task.id);
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO study_sessions (id, student_id, date, subject_id, minutes, task_id, auto)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+      `).run(uid('ss'), task.student_id, isoDate(), task.subject_id, Number(task.minutes) || 0, task.id);
+    }
+  }
+  if (!done) db.prepare('DELETE FROM study_sessions WHERE task_id = ? AND auto = 1').run(task.id);
+}
+
+const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif']);
+
+function saveBase64Image(dataUri, prefix = 'img') {
+  if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:image/')) {
+    return { error: 'تصویر کار عملی را انتخاب کنید.' };
+  }
+  const matches = dataUri.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+  if (!matches) return { error: 'فرمت تصویر پشتیبانی نمی‌شود.' };
+  const ext = matches[1].toLowerCase() === 'jpeg' ? 'jpg' : matches[1].toLowerCase();
+  if (!IMAGE_EXT.has(ext)) return { error: 'فقط تصویر JPG، PNG یا WEBP مجاز است.' };
+  const buffer = Buffer.from(matches[2], 'base64');
+  if (!buffer.length || buffer.length > 6 * 1024 * 1024) return { error: 'حجم تصویر باید کمتر از ۶ مگابایت باشد.' };
+  const filename = `${prefix}_${Date.now()}_${randomInt(10000)}.${ext === 'jpeg' ? 'jpg' : ext}`;
+  fs.writeFileSync(resolve(uploadsDir, filename), buffer);
+  return { url: `/uploads/${filename}` };
+}
+
+// ── Auth ──
 app.post('/api/auth/otp', async (req, res) => {
-  const { phone } = req.body;
-  if (!phone) return res.status(400).json({ message: 'شماره موبایل را وارد کنید.' });
-  const cleanPhone = normalizePhone(phone);
+  const ip = req.ip || 'unknown';
+  if (hitLimit(`otp-ip:${ip}`, 12, 10 * 60 * 1000)) {
+    return res.status(429).json({ message: 'تعداد درخواست‌ها زیاد است. کمی بعد دوباره تلاش کنید.' });
+  }
+  const cleanPhone = normalizePhone(req.body?.phone);
   if (!/^09\d{9}$/.test(cleanPhone)) {
     return res.status(400).json({ message: 'شماره موبایل ۱۱ رقمی معتبر وارد کنید (مثال: ۰۹۱۲۳۴۵۶۷۸۹).' });
   }
-
-  // Rate Limiting: 60s cooldown per number
   const existingOtp = db.prepare('SELECT * FROM otps WHERE phone = ?').get(cleanPhone);
   const now = Date.now();
   if (existingOtp && now - existingOtp.created_at < 60000) {
     const remainSec = Math.ceil((60000 - (now - existingOtp.created_at)) / 1000);
     return res.status(429).json({ message: `لطفاً ${remainSec} ثانیه دیگر جهت درخواست مجدد کد تایید صبر کنید.` });
   }
-
-  // Generate 5-digit code
-  const code = String(Math.floor(10000 + Math.random() * 90000));
-  const expiresAt = now + (2 * 60 * 1000); // 2 minutes expiry
-
+  const code = String(randomInt(10000, 100000));
   db.prepare(`
     INSERT OR REPLACE INTO otps (phone, code, expires_at, attempts, created_at)
     VALUES (?, ?, ?, 0, ?)
-  `).run(cleanPhone, code, expiresAt, now);
+  `).run(cleanPhone, code, now + 2 * 60 * 1000, now);
 
-  const u = db.prepare('SELECT * FROM users WHERE phone = ?').get(cleanPhone);
-
-  // Send real SMS
   const smsRes = await sendOtpSms(cleanPhone, code);
-
-  res.json({
-    ok: true,
-    isNew: !u,
-    message: smsRes.message || 'کد تأیید ارسال شد.',
-  });
+  const user = db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone);
+  if (!smsRes.success) {
+    db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
+    if (user && !smsLive()) {
+      return res.json({
+        ok: true,
+        isNew: false,
+        message: 'پیامک هنوز وصل نشده است. اگر این شماره از قبل حساب دارد، کد آزمایشی همان حساب را وارد کنید.',
+      });
+    }
+    return res.status(503).json({ message: smsRes.error || 'ارسال پیامک انجام نشد. کمی بعد دوباره تلاش کنید.' });
+  }
+  if (smsRes.method === 'verify') {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sms_live', '1')").run();
+  }
+  res.json({ ok: true, isNew: !user, message: 'کد تأیید ارسال شد.' });
 });
 
 app.post('/api/auth/verify', (req, res) => {
-  const { phone, code, name, role, field } = req.body;
-  const cleanPhone = normalizePhone(phone);
-  const cleanCode = normalizeCode(code);
-
-  if (!cleanPhone || !cleanCode) {
+  const ip = req.ip || 'unknown';
+  if (hitLimit(`verify-ip:${ip}`, 20, 10 * 60 * 1000)) {
+    return res.status(429).json({ message: 'تعداد تلاش‌ها زیاد است. کمی بعد دوباره تلاش کنید.' });
+  }
+  const { name, role, field } = req.body || {};
+  const cleanPhone = normalizePhone(req.body?.phone);
+  const cleanCode = normalizeCode(req.body?.code);
+  if (!/^09\d{9}$/.test(cleanPhone) || !cleanCode) {
     return res.status(400).json({ message: 'شماره موبایل و کد تایید الزامی هستند.' });
   }
 
-  // Check demo fallback code '12345'
-  const isDemoCode = cleanCode === '12345';
-
-  if (!isDemoCode) {
+  const existingUser = db.prepare('SELECT * FROM users WHERE phone = ?').get(cleanPhone);
+  const allowDemo = cleanCode === '12345' && existingUser && (demoAuthEnabled() || !smsLive());
+  if (!allowDemo) {
     const otpRow = db.prepare('SELECT * FROM otps WHERE phone = ?').get(cleanPhone);
-    if (!otpRow) {
-      return res.status(400).json({ message: 'کد تأیید برای این شماره یافت نشد یا منقضی شده است. لطفاً دوباره درخواست دهید.' });
-    }
-
+    if (!otpRow) return res.status(400).json({ message: 'کد تأیید برای این شماره یافت نشد یا منقضی شده است. لطفاً دوباره درخواست دهید.' });
     if (Date.now() > otpRow.expires_at) {
       db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
       return res.status(400).json({ message: 'کد تأیید منقضی شده است (اعتبار ۲ دقیقه). لطفاً کد جدید دریافت کنید.' });
     }
-
     if (otpRow.attempts >= 5) {
       db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
       return res.status(400).json({ message: 'تعداد دفعات ورود اشتباه بیش از حد مجاز بود. لطفاً کد جدید دریافت کنید.' });
     }
-
     if (otpRow.code !== cleanCode) {
       db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE phone = ?').run(cleanPhone);
       return res.status(400).json({ message: 'کد تأیید واردشده نادرست است.' });
     }
-
-    // Success: remove used OTP
     db.prepare('DELETE FROM otps WHERE phone = ?').run(cleanPhone);
   }
 
-  let u = db.prepare('SELECT * FROM users WHERE phone = ?').get(cleanPhone);
-  if (!u) {
-    if (!name?.trim()) {
-      return res.status(200).json({ needsProfile: true });
+  let user = existingUser;
+  if (!user) {
+    if (allowDemo) return res.status(400).json({ message: 'کد تأیید واردشده نادرست است.' });
+    if (role === 'counselor' || role === 'admin') {
+      return res.status(403).json({ message: 'حساب مشاور فقط توسط مدیر سامانه ساخته می‌شود.' });
     }
-    const userRole = role === 'counselor' ? 'counselor' : 'student';
-    const id = uid(userRole === 'counselor' ? 'c' : 's');
-    const color = userRole === 'counselor' ? '#e5446d' : '#2b3fd6';
+    if (!name?.trim()) return res.status(200).json({ needsProfile: true });
+    const id = uid('s');
     db.prepare(`
       INSERT INTO users (id, role, name, phone, field, color, counselor_id, plan, status, renew_at, speciality)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', null, ?)
-    `).run(
-      id,
-      userRole,
-      name.trim(),
-      cleanPhone,
-      userRole === 'student' ? (field || 'گرافیک') : null,
-      color,
-      userRole === 'student' ? 'c1' : null,
-      userRole === 'counselor' ? 'trial' : null,
-      userRole === 'counselor' ? 'مشاور کنکور هنر' : null
-    );
-    u = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+      VALUES (?, 'student', ?, ?, ?, '#2b3fd6', null, null, 'active', null, null)
+    `).run(id, name.trim().slice(0, 80), cleanPhone, field || 'گرافیک');
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   }
-
-  const token = `tok_${randomBytes(16).toString('hex')}`;
-  db.prepare('INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)').run(token, u.id, new Date().toISOString());
-  res.json({ token, user: u });
+  if (user.status === 'suspended') {
+    return res.status(403).json({ message: 'این حساب غیرفعال است. با پشتیبانی تماس بگیرید.' });
+  }
+  res.json({ token: issueToken(user.id), user: userPublic(user) });
 });
 
 app.post('/api/auth/demo-login', (req, res) => {
-  const { role } = req.body;
-  const u = db.prepare('SELECT * FROM users WHERE role = ? LIMIT 1').get(role || 'student');
-  if (!u) return res.status(404).json({ message: 'حساب نمونه یافت نشد.' });
-  const token = `tok_${randomBytes(16).toString('hex')}`;
-  db.prepare('INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)').run(token, u.id, new Date().toISOString());
-  res.json({ token, user: u });
+  if (!demoAuthEnabled()) return res.status(404).json({ message: 'ورود نمایشی غیرفعال است.' });
+  const user = db.prepare('SELECT * FROM users WHERE role = ? AND status = ? LIMIT 1').get(req.body?.role || 'student', 'active');
+  if (!user) return res.status(404).json({ message: 'حساب نمونه یافت نشد.' });
+  res.json({ token: issueToken(user.id), user: userPublic(user) });
+});
+
+app.post('/api/auth/logout', authRequired, (req, res) => {
+  const token = req.headers.authorization.slice(7).trim();
+  db.prepare('DELETE FROM tokens WHERE token = ?').run(token);
+  res.json({ ok: true });
 });
 
 app.get('/api/me', authRequired, (req, res) => {
-  res.json(req.user);
+  res.json(userPublic(req.user));
 });
 
-// ── Basic Lookups ──
 app.get('/api/syllabus', (req, res) => res.json(SUBJECTS));
 app.get('/api/plan-templates', (req, res) => res.json(TEMPLATES));
 app.get('/api/plans', (req, res) => res.json(PLANS));
 app.get('/api/fields', (req, res) => res.json(FIELDS));
 
-// ── Counselor: Students ──
-app.get('/api/students', authRequired, (req, res) => {
-  const counselorId = req.user.role === 'counselor' ? req.user.id : req.query.counselorId || 'c1';
-  const students = db.prepare("SELECT * FROM users WHERE role = 'student' AND counselor_id = ?").all(counselorId);
-
-  const now = new Date();
-  const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0'), d = String(now.getDate()).padStart(2, '0');
-  const today = `${y}-${m}-${d}`;
-
-  const items = students.map((s) => {
-    const tasks = db.prepare('SELECT * FROM tasks WHERE student_id = ?').all(s.id);
-    const pastTasks = tasks.filter((t) => t.date <= today);
-    const pastDone = pastTasks.filter((t) => t.done).length;
-    const pastRate = pastTasks.length ? pastDone / pastTasks.length : null;
-
-    let status = 'good';
-    if (!tasks.length) status = 'noplan';
-    else if (pastRate !== null) status = pastRate >= 0.7 ? 'good' : pastRate >= 0.4 ? 'warn' : 'late';
-
-    const results = db.prepare('SELECT percent FROM exam_results WHERE student_id = ?').all(s.id);
-    const avgScore = results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null;
-
-    return {
-      ...s,
-      weekDone: tasks.filter((t) => t.done).length,
-      weekTotal: tasks.length,
-      pastRate,
-      lastActive: today,
-      avgScore,
-      status,
-      pendingExams: 0,
-    };
+app.get('/api/public/stats', (req, res) => {
+  res.json({
+    counselors: db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'counselor' AND status = 'active'").get().c,
+    students: db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'student'").get().c,
+    exams: db.prepare('SELECT COUNT(*) as c FROM exams').get().c,
+    questions: db.prepare('SELECT COUNT(*) as c FROM questions').get().c,
   });
+});
 
-  const plan = PLANS.find((p) => p.id === req.user.plan) || PLANS[1];
-  res.json({ items, limit: plan.studentLimit, planId: plan.id });
+// ── Students ──
+app.get('/api/students', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const counselorId = req.user.role === 'counselor' ? req.user.id : req.query.counselorId;
+  const students = counselorId
+    ? db.prepare("SELECT * FROM users WHERE role = 'student' AND counselor_id = ?").all(counselorId)
+    : db.prepare("SELECT * FROM users WHERE role = 'student'").all();
+  const plan = PLANS.find((p) => p.id === req.user.plan) || null;
+  res.json({
+    items: students.map(studentStats),
+    limit: plan?.studentLimit ?? null,
+    planId: req.user.plan || null,
+  });
 });
 
 app.get('/api/students/:id', authRequired, (req, res) => {
-  const s = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!s) return res.status(404).json({ message: 'دانش‌آموز یافت نشد.' });
-
-  const now = new Date();
-  const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0'), d = String(now.getDate()).padStart(2, '0');
-  const today = `${y}-${m}-${d}`;
-
-  const tasks = db.prepare('SELECT * FROM tasks WHERE student_id = ?').all(s.id);
-  const pastTasks = tasks.filter((t) => t.date <= today);
-  const pastDone = pastTasks.filter((t) => t.done).length;
-  const pastRate = pastTasks.length ? pastDone / pastTasks.length : null;
-
-  let status = 'good';
-  if (!tasks.length) status = 'noplan';
-  else if (pastRate !== null) status = pastRate >= 0.7 ? 'good' : pastRate >= 0.4 ? 'warn' : 'late';
-
-  const results = db.prepare('SELECT percent FROM exam_results WHERE student_id = ?').all(s.id);
-  const avgScore = results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null;
-
-  res.json({
-    ...s,
-    status,
-    avgScore,
-    weekDone: tasks.filter((t) => t.done).length,
-    weekTotal: tasks.length,
-    lastActive: today,
-    pastRate,
-  });
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
+  res.json(studentStats(student));
 });
 
-app.post('/api/students', authRequired, (req, res) => {
-  const { name, phone, field } = req.body;
-  if (!name?.trim()) return res.status(400).json({ message: 'نام دانش‌آموز الزامی است.' });
-  const cleanPhone = String(phone).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).trim();
+app.post('/api/students', authRequired, requireRole('counselor'), (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const cleanPhone = normalizePhone(req.body?.phone);
+  if (!name) return res.status(400).json({ message: 'نام دانش‌آموز الزامی است.' });
   if (!/^09\d{9}$/.test(cleanPhone)) return res.status(400).json({ message: 'شماره موبایل معتبر نیست.' });
-
-  const exists = db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone);
-  if (exists) return res.status(400).json({ message: 'این شماره قبلاً ثبت شده است.' });
-
+  if (db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone)) {
+    return res.status(400).json({ message: 'این شماره قبلاً ثبت شده است.' });
+  }
+  const plan = PLANS.find((p) => p.id === req.user.plan);
+  const limit = plan?.studentLimit ?? 0;
+  const count = db.prepare("SELECT COUNT(*) as c FROM users WHERE counselor_id = ? AND role = 'student'").get(req.user.id).c;
+  if (count >= limit) {
+    return res.status(400).json({ message: `ظرفیت پلن شما ${limit} دانش‌آموز است. برای افزودن بیشتر پلن را ارتقا دهید.` });
+  }
   const id = uid('s');
   db.prepare(`
     INSERT INTO users (id, role, name, phone, field, color, counselor_id, plan, status, renew_at)
     VALUES (?, 'student', ?, ?, ?, '#2b3fd6', ?, null, 'active', null)
-  `).run(id, name.trim(), cleanPhone, field || 'گرافیک', req.user.id);
-
-  const newUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  res.json(newUser);
+  `).run(id, name.slice(0, 80), cleanPhone, req.body?.field || 'گرافیک', req.user.id);
+  res.json(userPublic(db.prepare('SELECT * FROM users WHERE id = ?').get(id)));
 });
 
-// ── Plans & Tasks ──
+// ── Tasks ──
 app.get('/api/students/:id/tasks', authRequired, (req, res) => {
-  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
   const { from, to } = req.query;
-  let q = 'SELECT * FROM tasks WHERE student_id = ?';
-  const args = [studentId];
+  let sql = 'SELECT * FROM tasks WHERE student_id = ?';
+  const args = [student.id];
   if (from && to) {
-    q += ' AND date >= ? AND date <= ?';
+    if (!validDate(from) || !validDate(to)) return res.status(400).json({ message: 'بازه تاریخ نامعتبر است.' });
+    sql += ' AND date >= ? AND date <= ?';
     args.push(from, to);
   }
-  q += ' ORDER BY date ASC';
-  const tasks = db.prepare(q).all(...args);
-  res.json(tasks.map((t) => ({ ...t, done: Boolean(t.done) })));
+  sql += ' ORDER BY date ASC';
+  res.json(db.prepare(sql).all(...args).map(taskPublic));
 });
 
 app.post('/api/students/:id/tasks', authRequired, (req, res) => {
-  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
-  const { date, subjectId, topicId, type, minutes, note, title } = req.body;
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
+  const { date, subjectId, topicId, type, minutes, note, title } = req.body || {};
+  if (!validDate(date) || !subjectId || !topicId) return res.status(400).json({ message: 'تاریخ، درس و مبحث الزامی است.' });
   const id = uid('t');
+  const mins = Math.min(600, Math.max(1, Number(minutes) || 45));
   db.prepare(`
     INSERT INTO tasks (id, student_id, date, subject_id, topic_id, type, minutes, title, note, done)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-  `).run(id, studentId, date, subjectId, topicId, type || 'study', Number(minutes) || 60, title || `${type} ${topicId}`, note || '');
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
-  res.json({ ...task, done: false });
+  `).run(id, student.id, date, subjectId, topicId, type || 'study', mins, title || `${type || 'study'} ${topicId}`, note || '');
+  res.json(taskPublic(db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)));
 });
 
 app.patch('/api/tasks/:id', authRequired, (req, res) => {
-  const { date, subjectId, topicId, type, minutes, note, title, done } = req.body;
-  const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-  if (!t) return res.status(404).json({ message: 'تسک پیدا نشد.' });
-
+  const task = loadTask(req, res, req.params.id);
+  if (!task) return;
+  const { date, subjectId, topicId, type, minutes, note, title, done } = req.body || {};
+  if (date !== undefined && !validDate(date)) return res.status(400).json({ message: 'تاریخ نامعتبر است.' });
   db.prepare(`
     UPDATE tasks SET
       date = COALESCE(?, date),
@@ -312,380 +476,408 @@ app.patch('/api/tasks/:id', authRequired, (req, res) => {
     subjectId ?? null,
     topicId ?? null,
     type ?? null,
-    minutes !== undefined ? Number(minutes) : null,
+    minutes !== undefined ? Math.min(600, Math.max(1, Number(minutes) || 1)) : null,
     note ?? null,
     title ?? null,
     done !== undefined ? (done ? 1 : 0) : null,
-    req.params.id
+    task.id,
   );
-
-  const updated = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-  res.json({ ...updated, done: Boolean(updated.done) });
+  const updated = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
+  if (done !== undefined) setTaskDone(updated, Boolean(done));
+  res.json(taskPublic(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id)));
 });
 
 app.delete('/api/tasks/:id', authRequired, (req, res) => {
-  db.prepare('DELETE FROM tasks WHERE id = ?').run(req.params.id);
+  const task = loadTask(req, res, req.params.id);
+  if (!task) return;
+  db.prepare('DELETE FROM study_sessions WHERE task_id = ? AND auto = 1').run(task.id);
+  db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
   res.json({ ok: true });
 });
 
 app.post('/api/tasks/:id/done', authRequired, (req, res) => {
-  const doneVal = req.body.done ? 1 : 0;
-  db.prepare('UPDATE tasks SET done = ? WHERE id = ?').run(doneVal, req.params.id);
-  res.json({ done: Boolean(doneVal) });
+  const task = loadTask(req, res, req.params.id);
+  if (!task) return;
+  const done = Boolean(req.body?.done);
+  setTaskDone(task, done);
+  res.json({ done });
 });
 
 app.post('/api/students/:id/plan/template', authRequired, (req, res) => {
-  const { templateId, weekStart } = req.body;
-  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
+  const { templateId, weekStart } = req.body || {};
+  if (!validDate(weekStart)) return res.status(400).json({ message: 'تاریخ هفته نامعتبر است.' });
   const tpl = TEMPLATES.find((t) => t.id === templateId);
   if (!tpl) return res.status(404).json({ message: 'قالب پیدا نشد.' });
-
   const insert = db.prepare(`
     INSERT INTO tasks (id, student_id, date, subject_id, topic_id, type, minutes, title, note, done)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
-
-  const [y, m, d] = weekStart.split('-').map(Number);
-  const base = new Date(y, m - 1, d);
-
   for (const t of tpl.tasks) {
-    const taskDate = new Date(base);
-    taskDate.setDate(taskDate.getDate() + t.day);
-    const iso = `${taskDate.getFullYear()}-${String(taskDate.getMonth() + 1).padStart(2, '0')}-${String(taskDate.getDate()).padStart(2, '0')}`;
-    insert.run(uid('t'), studentId, iso, t.subjectId, t.topicId, t.type, t.minutes, t.title || `${t.type} ${t.topicId}`, t.note || '');
+    insert.run(uid('t'), student.id, shiftDate(weekStart, t.day), t.subjectId, t.topicId, t.type, t.minutes, t.title || `${t.type} ${t.topicId}`, t.note || '');
   }
-
   res.json({ added: tpl.tasks.length });
 });
 
 app.post('/api/students/:id/plan/copy-week', authRequired, (req, res) => {
-  const { fromWeekStart, toWeekStart } = req.body;
-  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
-
-  const [fy, fm, fd] = fromWeekStart.split('-').map(Number);
-  const fStart = new Date(fy, fm - 1, fd);
-  const fEnd = new Date(fStart);
-  fEnd.setDate(fEnd.getDate() + 6);
-  const fEndISO = `${fEnd.getFullYear()}-${String(fEnd.getMonth() + 1).padStart(2, '0')}-${String(fEnd.getDate()).padStart(2, '0')}`;
-
-  const tasks = db.prepare('SELECT * FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').all(studentId, fromWeekStart, fEndISO);
-
-  const [ty, tm, td] = toWeekStart.split('-').map(Number);
-  const tStart = new Date(ty, tm - 1, td);
-
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
+  const { fromWeekStart, toWeekStart } = req.body || {};
+  if (!validDate(fromWeekStart) || !validDate(toWeekStart)) return res.status(400).json({ message: 'تاریخ هفته نامعتبر است.' });
+  const fromEnd = shiftDate(fromWeekStart, 6);
+  const tasks = db.prepare('SELECT * FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').all(student.id, fromWeekStart, fromEnd);
   const insert = db.prepare(`
     INSERT INTO tasks (id, student_id, date, subject_id, topic_id, type, minutes, title, note, done)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
-
+  const [fy, fm, fd] = fromWeekStart.split('-').map(Number);
+  const fromDate = new Date(fy, fm - 1, fd);
   for (const t of tasks) {
-    const dObj = new Date(t.date);
-    const diffDays = Math.round((dObj - fStart) / 86400000);
-    const newDate = new Date(tStart);
-    newDate.setDate(newDate.getDate() + diffDays);
-    const newISO = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, '0')}-${String(newDate.getDate()).padStart(2, '0')}`;
-    insert.run(uid('t'), studentId, newISO, t.subject_id, t.topic_id, t.type, t.minutes, t.title, t.note);
+    const [ty, tm, td] = t.date.split('-').map(Number);
+    const diffDays = Math.round((new Date(ty, tm - 1, td) - fromDate) / 86400000);
+    insert.run(uid('t'), student.id, shiftDate(toWeekStart, diffDays), t.subject_id, t.topic_id, t.type, t.minutes, t.title, t.note);
   }
-
   res.json({ added: tasks.length });
 });
 
 app.delete('/api/students/:id/plan/week', authRequired, (req, res) => {
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
   const { weekStart } = req.query;
-  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
-  const [y, m, d] = weekStart.split('-').map(Number);
-  const wStart = new Date(y, m - 1, d);
-  const wEnd = new Date(wStart);
-  wEnd.setDate(wEnd.getDate() + 6);
-  const wEndISO = `${wEnd.getFullYear()}-${String(wEnd.getMonth() + 1).padStart(2, '0')}-${String(wEnd.getDate()).padStart(2, '0')}`;
-
-  const info = db.prepare('DELETE FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').run(studentId, weekStart, wEndISO);
+  if (!validDate(weekStart)) return res.status(400).json({ message: 'تاریخ هفته نامعتبر است.' });
+  const end = shiftDate(weekStart, 6);
+  const doomed = db.prepare('SELECT id FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').all(student.id, weekStart, end);
+  for (const t of doomed) db.prepare('DELETE FROM study_sessions WHERE task_id = ? AND auto = 1').run(t.id);
+  const info = db.prepare('DELETE FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').run(student.id, weekStart, end);
   res.json({ removed: info.changes });
 });
 
-app.post('/api/students/:id/plan/publish', authRequired, (req, res) => {
-  const studentId = req.params.id;
+app.post('/api/students/:id/plan/publish', authRequired, requireRole('counselor'), (req, res) => {
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
   db.prepare(`
     INSERT INTO notifications (id, user_id, text, date, read, link)
     VALUES (?, ?, 'مشاور برنامه‌ی جدید شما را منتشر کرد.', ?, 0, '/s/plan')
-  `).run(uid('n'), studentId, new Date().toISOString().slice(0, 10));
+  `).run(uid('n'), student.id, isoDate());
   res.json({ ok: true });
 });
 
-// ── Question Bank ──
-app.get('/api/questions', authRequired, (req, res) => {
-  const { subjectId, topicId, q } = req.query;
+// ── Questions ──
+app.get('/api/questions', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const { subjectId, topicId, difficulty, q } = req.query;
   let sql = 'SELECT * FROM questions WHERE 1=1';
   const args = [];
+  if (req.user.role === 'counselor') {
+    sql += ' AND owner_id = ?';
+    args.push(req.user.id);
+  }
   if (topicId) {
     sql += ' AND topic_id = ?';
     args.push(topicId);
+  } else if (subjectId) {
+    const subject = SUBJECTS.find((s) => s.id === subjectId);
+    const ids = subject?.topics.map((t) => t.id) || [];
+    if (!ids.length) return res.json([]);
+    sql += ` AND topic_id IN (${ids.map(() => '?').join(',')})`;
+    args.push(...ids);
+  }
+  if (difficulty) {
+    sql += ' AND difficulty = ?';
+    args.push(difficulty);
   }
   if (q) {
     sql += ' AND text LIKE ?';
-    args.push(`%${q}%`);
+    args.push(`%${String(q).slice(0, 80)}%`);
   }
   sql += ' ORDER BY id DESC';
-  const list = db.prepare(sql).all(...args);
-  res.json(list.map((item) => ({ ...item, options: JSON.parse(item.options) })));
+  res.json(db.prepare(sql).all(...args).map((item) => questionPublic(item, false)));
 });
 
-app.post('/api/questions', authRequired, (req, res) => {
-  const { topicId, text, options, answer, explanation, difficulty } = req.body;
+app.post('/api/questions', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const { topicId, text, options, answer, explanation, difficulty } = req.body || {};
+  if (!topicId || !text || !Array.isArray(options) || options.length !== 4) {
+    return res.status(400).json({ message: 'متن سؤال و چهار گزینه الزامی است.' });
+  }
   const id = uid('q');
   db.prepare(`
     INSERT INTO questions (id, topic_id, text, options, answer, explanation, difficulty, owner_id, source)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'counselor')
   `).run(id, topicId, text, JSON.stringify(options), Number(answer) || 0, explanation || '', difficulty || 'medium', req.user.id);
-  res.json({ id, topicId, text, options, answer, explanation, difficulty, source: 'counselor' });
+  res.json(questionPublic(db.prepare('SELECT * FROM questions WHERE id = ?').get(id), false));
 });
 
-app.put('/api/questions/:id', authRequired, (req, res) => {
-  const { topicId, text, options, answer, explanation, difficulty } = req.body;
+app.put('/api/questions/:id', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const current = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id);
+  if (!current) return res.status(404).json({ message: 'سؤال پیدا نشد.' });
+  if (req.user.role === 'counselor' && current.owner_id !== req.user.id) {
+    return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  }
+  const { topicId, text, options, answer, explanation, difficulty } = req.body || {};
   db.prepare(`
     UPDATE questions SET topic_id = ?, text = ?, options = ?, answer = ?, explanation = ?, difficulty = ?
     WHERE id = ?
-  `).run(topicId, text, JSON.stringify(options), Number(answer) || 0, explanation || '', difficulty || 'medium', req.params.id);
-  res.json({ id: req.params.id, topicId, text, options, answer, explanation, difficulty });
+  `).run(topicId, text, JSON.stringify(options), Number(answer) || 0, explanation || '', difficulty || 'medium', current.id);
+  res.json(questionPublic(db.prepare('SELECT * FROM questions WHERE id = ?').get(current.id), false));
 });
 
-app.delete('/api/questions/:id', authRequired, (req, res) => {
-  db.prepare('DELETE FROM questions WHERE id = ?').run(req.params.id);
+app.delete('/api/questions/:id', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const current = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id);
+  if (!current) return res.status(404).json({ message: 'سؤال پیدا نشد.' });
+  if (req.user.role === 'counselor' && current.owner_id !== req.user.id) {
+    return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  }
+  db.prepare('DELETE FROM questions WHERE id = ?').run(current.id);
   res.json({ ok: true });
 });
 
-app.post('/api/ai/questions', authRequired, async (req, res) => {
-  const { count = 3, topicIds = ['iran_art'], difficulty = 'medium' } = req.body;
-  const topicNamesMap = {};
-  for (const s of SUBJECTS) {
-    for (const t of s.topics) {
-      topicNamesMap[t.id] = t.name;
-    }
+app.post('/api/ai/questions', authRequired, requireRole('counselor', 'admin'), async (req, res) => {
+  if (hitLimit(`aiq:${req.user.id}`, 10, 60 * 60 * 1000)) {
+    return res.status(429).json({ message: 'تعداد ساخت سؤال زیاد است. کمی بعد دوباره تلاش کنید.' });
   }
-  const questions = await generateGeminiQuestions(topicIds, Number(count) || 3, difficulty, topicNamesMap);
-  res.json(questions);
+  try {
+    const topicIds = Array.isArray(req.body?.topicIds) && req.body.topicIds.length ? req.body.topicIds.slice(0, 6) : ['iran_art'];
+    const count = Math.min(8, Math.max(1, Number(req.body?.count) || 3));
+    const questions = await generateGeminiQuestions(topicIds, count, req.body?.difficulty || 'medium', TOPICS.names);
+    res.json(questions);
+  } catch {
+    res.status(500).json({ message: 'ساخت سؤال الان انجام نشد. دوباره تلاش کنید.' });
+  }
 });
 
 // ── Exams ──
 app.get('/api/exams', authRequired, (req, res) => {
   const isStudent = req.user.role === 'student';
   const list = db.prepare('SELECT * FROM exams ORDER BY created_at DESC').all();
-
-  const out = list.map((e) => {
-    const qIds = JSON.parse(e.question_ids);
-    const sIds = JSON.parse(e.student_ids);
-    const topicIds = JSON.parse(e.topic_ids);
-
+  const out = [];
+  for (const exam of list) {
+    const qIds = safeJson(exam.question_ids, []);
+    const sIds = safeJson(exam.student_ids, []);
+    const topicIds = safeJson(exam.topic_ids, []);
     if (isStudent) {
-      const isEligible = !sIds.length || sIds.includes('*') || sIds.includes('all') || sIds.includes(req.user.id);
-      if (!isEligible) return null;
-
-      const resRow = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(e.id, req.user.id);
-      return {
-        id: e.id,
-        title: e.title,
+      if (!studentCanTake(req.user, exam)) continue;
+      const resRow = db.prepare('SELECT percent, finished_at FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, req.user.id);
+      out.push({
+        id: exam.id,
+        title: exam.title,
         topicIds,
         questionCount: qIds.length,
-        durationMin: e.duration_min,
-        deadline: e.deadline,
+        durationMin: exam.duration_min,
+        deadline: exam.deadline,
         status: resRow ? 'done' : 'new',
         score: resRow ? resRow.percent : null,
         finishedAt: resRow ? resRow.finished_at : null,
-      };
-    } else {
-      const results = db.prepare('SELECT * FROM exam_results WHERE exam_id = ?').all(e.id);
+      });
+    } else if (counselorOwnsExam(req.user, exam)) {
+      const results = db.prepare('SELECT percent FROM exam_results WHERE exam_id = ?').all(exam.id);
       const avg = results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null;
-      return {
-        id: e.id,
-        title: e.title,
+      out.push({
+        id: exam.id,
+        title: exam.title,
         topicIds,
         questionCount: qIds.length,
-        durationMin: e.duration_min,
-        deadline: e.deadline,
-        createdAt: e.created_at,
-        sent: sIds.length,
+        durationMin: exam.duration_min,
+        deadline: exam.deadline,
+        createdAt: exam.created_at,
+        sent: sIds.includes('*') || sIds.includes('all') ? results.length : sIds.length,
         submitted: results.length,
         avg,
-      };
+      });
     }
-  });
-
-  res.json(out.filter(Boolean));
+  }
+  res.json(out);
 });
 
-app.post('/api/exams', authRequired, (req, res) => {
-  const { title, topicIds, questionIds = [], newQuestions = [], studentIds = [], durationMin, deadline } = req.body;
+app.post('/api/exams', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const { title, topicIds, questionIds = [], newQuestions = [], studentIds = [], durationMin, deadline } = req.body || {};
+  if (!String(title || '').trim()) return res.status(400).json({ message: 'برای آزمون یک عنوان بنویس.' });
+  if (!Array.isArray(studentIds) || !studentIds.length) return res.status(400).json({ message: 'حداقل یک دانش‌آموز را انتخاب کن.' });
+  for (const sid of studentIds) {
+    const student = studentById(sid);
+    if (!student) return res.status(400).json({ message: 'یکی از دانش‌آموزهای انتخاب‌شده پیدا نشد.' });
+    if (req.user.role === 'counselor' && student.counselor_id !== req.user.id) {
+      return res.status(403).json({ message: 'فقط می‌توانید برای دانش‌آموزهای خودتان آزمون بسازید.' });
+    }
+  }
   const insertQ = db.prepare(`
     INSERT INTO questions (id, topic_id, text, options, answer, explanation, difficulty, owner_id, source)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ai')
   `);
-
   const allQIds = [...questionIds];
   for (const q of newQuestions) {
+    if (!q?.text || !Array.isArray(q.options)) continue;
     const qid = uid('q');
-    insertQ.run(qid, q.topicId, q.text, JSON.stringify(q.options), q.answer, q.explanation, q.difficulty, req.user.id);
+    insertQ.run(qid, q.topicId, q.text, JSON.stringify(q.options), Number(q.answer) || 0, q.explanation || '', q.difficulty || 'medium', req.user.id);
     allQIds.push(qid);
   }
-
+  if (!allQIds.length) return res.status(400).json({ message: 'آزمون باید حداقل یک سؤال داشته باشد.' });
   const examId = uid('e');
   db.prepare(`
     INSERT INTO exams (id, title, created_by, topic_ids, question_ids, student_ids, duration_min, deadline, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(examId, title, req.user.id, JSON.stringify(topicIds), JSON.stringify(allQIds), JSON.stringify(studentIds), Number(durationMin) || 15, deadline || null, new Date().toISOString().slice(0, 10));
-
+  `).run(
+    examId,
+    String(title).trim(),
+    req.user.id,
+    JSON.stringify(topicIds || []),
+    JSON.stringify(allQIds),
+    JSON.stringify(studentIds),
+    Number(durationMin) || 15,
+    deadline || null,
+    isoDate(),
+  );
+  const today = isoDate();
   for (const stId of studentIds) {
     db.prepare(`
       INSERT INTO notifications (id, user_id, text, date, read, link)
       VALUES (?, ?, ?, ?, 0, '/s/exams')
-    `).run(uid('n'), stId, `آزمون جدید «${title}» برای شما فعال شد.`, new Date().toISOString().slice(0, 10));
+    `).run(uid('n'), stId, `آزمون جدید «${String(title).trim()}» برای شما فعال شد.`, today);
   }
-
   res.json({ id: examId });
 });
 
-app.post('/api/exams/self', authRequired, (req, res) => {
-  const { title, topicIds = ['iran_art'], count = 10 } = req.body;
-  const allQs = db.prepare('SELECT id, topic_id FROM questions').all();
-  let matched = allQs.filter((q) => topicIds.includes(q.topic_id)).map((q) => q.id);
-
-  if (matched.length < count) {
-    const insertQ = db.prepare(`
-      INSERT INTO questions (id, topic_id, text, options, answer, explanation, difficulty, owner_id, source)
-      VALUES (?, ?, ?, ?, 0, 'پاسخ تشریحی خودسنجی کنکور هنر', 'medium', ?, 'ai')
-    `);
-    while (matched.length < count) {
-      const qid = uid('q');
-      const tId = topicIds[matched.length % topicIds.length];
-      insertQ.run(qid, tId, `سؤال خودسنجی مبحث ${tId} شماره ${matched.length + 1}`, JSON.stringify(['گزینه الف (صحیح)', 'گزینه ب', 'گزینه ج', 'گزینه د']), req.user.id);
-      matched.push(qid);
-    }
+app.post('/api/exams/self', authRequired, requireRole('student'), (req, res) => {
+  const topicIds = Array.isArray(req.body?.topicIds) && req.body.topicIds.length ? req.body.topicIds : ['iran_art'];
+  const count = Math.min(30, Math.max(1, Number(req.body?.count) || 10));
+  const matched = db.prepare('SELECT id, topic_id FROM questions').all()
+    .filter((q) => topicIds.includes(q.topic_id))
+    .map((q) => q.id);
+  if (!matched.length) return res.status(400).json({ message: 'برای این مبحث هنوز سؤالی در بانک نیست.' });
+  for (let i = matched.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [matched[i], matched[j]] = [matched[j], matched[i]];
   }
-
-  const selectedIds = matched.slice(0, count);
+  const selected = matched.slice(0, Math.min(count, matched.length));
   const examId = uid('e');
-  const examTitle = title || `آزمون خودسنجی (${count} سؤال)`;
+  const title = req.body?.title || `آزمون خودسنجی (${selected.length} سؤال)`;
   db.prepare(`
     INSERT INTO exams (id, title, created_by, topic_ids, question_ids, student_ids, duration_min, deadline, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, null, ?)
-  `).run(examId, examTitle, req.user.id, JSON.stringify(topicIds), JSON.stringify(selectedIds), JSON.stringify([req.user.id]), Math.max(5, Math.round(count * 1.2)), new Date().toISOString().slice(0, 10));
-
+  `).run(examId, title, req.user.id, JSON.stringify(topicIds), JSON.stringify(selected), JSON.stringify([req.user.id]), Math.max(5, Math.round(selected.length * 1.2)), isoDate());
   res.json({ id: examId });
 });
 
 app.get('/api/exams/:id', authRequired, (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ message: 'آزمون یافت نشد.' });
-
-  const qIds = JSON.parse(exam.question_ids);
-  const questions = qIds.map((qid) => {
-    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
-    if (!q) return null;
-    return { ...q, options: JSON.parse(q.options) };
-  }).filter(Boolean);
-
-  const resRow = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, req.user.id);
+  const isStudent = req.user.role === 'student';
+  if (isStudent && !studentCanTake(req.user, exam)) return res.status(403).json({ message: 'این آزمون برای شما نیست.' });
+  if (!isStudent && !counselorOwnsExam(req.user, exam)) return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  const resRow = isStudent
+    ? db.prepare('SELECT id FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, req.user.id)
+    : null;
+  if (isStudent && !resRow) {
+    db.prepare('INSERT OR IGNORE INTO exam_starts (exam_id, student_id, started_at) VALUES (?, ?, ?)').run(exam.id, req.user.id, Date.now());
+  }
   res.json({
     id: exam.id,
     title: exam.title,
     durationMin: exam.duration_min,
     deadline: exam.deadline,
-    topicIds: JSON.parse(exam.topic_ids),
-    questions,
+    topicIds: safeJson(exam.topic_ids, []),
+    questions: loadQuestions(safeJson(exam.question_ids, []), isStudent && !resRow),
     alreadyDone: Boolean(resRow),
   });
 });
 
-app.post('/api/exams/:id/submit', authRequired, (req, res) => {
-  const { answers = {}, spentSec = 300 } = req.body;
+app.post('/api/exams/:id/submit', authRequired, requireRole('student'), (req, res) => {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ message: 'آزمون یافت نشد.' });
-
-  const qIds = JSON.parse(exam.question_ids);
-  let correct = 0, wrong = 0, blank = 0;
+  if (!studentCanTake(req.user, exam)) return res.status(403).json({ message: 'این آزمون برای شما نیست.' });
+  const existing = db.prepare('SELECT id FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, req.user.id);
+  if (existing) return res.status(400).json({ message: 'این آزمون را قبلاً داده‌ای.' });
+  const start = db.prepare('SELECT started_at FROM exam_starts WHERE exam_id = ? AND student_id = ?').get(exam.id, req.user.id);
+  if (!start) return res.status(400).json({ message: 'زمان آزمون ثبت نشده. صفحه آزمون را باز کنید و دوباره ارسال کنید.' });
+  const cap = Math.max(60, (Number(exam.duration_min) || 15) * 60);
+  const spent = Math.min(cap, Math.max(0, Math.round((Date.now() - Number(start.started_at)) / 1000)));
+  const answers = req.body?.answers && typeof req.body.answers === 'object' ? req.body.answers : {};
+  const qIds = safeJson(exam.question_ids, []);
+  let correct = 0;
+  let wrong = 0;
+  let blank = 0;
   const byTopicMap = {};
-
   for (const qid of qIds) {
     const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
     if (!q) continue;
-    const t = (byTopicMap[q.topic_id] ||= { topicId: q.topic_id, correct: 0, wrong: 0, total: 0 });
-    t.total++;
+    const topic = (byTopicMap[q.topic_id] ||= { topicId: q.topic_id, correct: 0, wrong: 0, total: 0 });
+    topic.total++;
     const userAns = answers[qid];
-    if (userAns === undefined || userAns === null) {
-      blank++;
-    } else if (Number(userAns) === q.answer) {
+    if (userAns === undefined || userAns === null) blank++;
+    else if (Number(userAns) === q.answer) {
       correct++;
-      t.correct++;
+      topic.correct++;
     } else {
       wrong++;
-      t.wrong++;
+      topic.wrong++;
     }
   }
-
-  const raw = correct - (wrong / 3);
+  const raw = correct - wrong / 3;
   const percent = qIds.length ? Math.max(0, Math.round((raw / qIds.length) * 100)) : 0;
   const resId = uid('r');
-
   db.prepare(`
     INSERT INTO exam_results (id, exam_id, student_id, answers, finished_at, spent_sec, correct, wrong, blank, percent, by_topic)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(resId, exam.id, req.user.id, JSON.stringify(answers), new Date().toISOString().slice(0, 10), Math.round(spentSec), correct, wrong, blank, percent, JSON.stringify(Object.values(byTopicMap)));
-
+  `).run(resId, exam.id, req.user.id, JSON.stringify(answers), isoDate(), spent, correct, wrong, blank, percent, JSON.stringify(Object.values(byTopicMap)));
   res.json({ id: resId, percent, correct, wrong, blank });
 });
 
 app.get('/api/exams/:id/result', authRequired, (req, res) => {
-  const examId = req.params.id;
-  const studentId = req.query.studentId || req.user.id;
-  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
-  const resRow = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(examId, studentId);
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
+  if (!exam) return res.status(404).json({ message: 'آزمون یافت نشد.' });
+  const studentId = req.user.role === 'student' ? req.user.id : req.query.studentId;
+  if (!studentId) return res.status(400).json({ message: 'دانش‌آموز مشخص نشده است.' });
   const student = db.prepare('SELECT * FROM users WHERE id = ?').get(studentId);
-
-  if (!exam || !resRow) return res.status(404).json({ message: 'نتیجه آزمون یافت نشد.' });
-
-  const qIds = JSON.parse(exam.question_ids);
-  const questions = qIds.map((qid) => {
-    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
-    return q ? { ...q, options: JSON.parse(q.options) } : null;
-  }).filter(Boolean);
-
+  if (req.user.role === 'student' && studentId !== req.user.id) return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  if (req.user.role === 'counselor' && student?.counselor_id !== req.user.id && exam.created_by !== req.user.id) {
+    return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  }
+  if (req.user.role !== 'admin' && req.user.role !== 'counselor' && req.user.role !== 'student') {
+    return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  }
+  const resRow = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, studentId);
+  if (!resRow) return res.status(404).json({ message: 'نتیجه آزمون یافت نشد.' });
   res.json({
-    exam: { ...exam, questions, topicIds: JSON.parse(exam.topic_ids) },
-    student,
-    result: {
-      ...resRow,
-      answers: JSON.parse(resRow.answers),
-      byTopic: JSON.parse(resRow.by_topic),
+    exam: {
+      id: exam.id,
+      title: exam.title,
+      topicIds: safeJson(exam.topic_ids, []),
+      durationMin: exam.duration_min,
+      deadline: exam.deadline,
+      questions: loadQuestions(safeJson(exam.question_ids, []), false),
     },
+    student: userPublic(student),
+    result: resultPublic(resRow),
   });
 });
 
-app.get('/api/exams/:id/results', authRequired, (req, res) => {
-  const examId = req.params.id;
-  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
+app.get('/api/exams/:id/results', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(req.params.id);
   if (!exam) return res.status(404).json({ message: 'آزمون یافت نشد.' });
-
-  const studentIds = JSON.parse(exam.student_ids);
-  const rows = studentIds.map((stId) => {
-    const student = db.prepare('SELECT * FROM users WHERE id = ?').get(stId);
-    const result = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(examId, stId);
-    return {
-      student,
-      result: result ? { ...result, answers: JSON.parse(result.answers), byTopic: JSON.parse(result.by_topic) } : null,
-    };
-  });
-
-  const qIds = JSON.parse(exam.question_ids);
-  const questions = qIds.map((qid) => {
-    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(qid);
-    return q ? { ...q, options: JSON.parse(q.options) } : null;
-  }).filter(Boolean);
-
+  if (!counselorOwnsExam(req.user, exam)) return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  const ids = audienceOf(exam);
+  const open = !ids.length || ids.includes('*') || ids.includes('all');
+  let rows;
+  if (open) {
+    rows = db.prepare('SELECT * FROM exam_results WHERE exam_id = ?').all(exam.id).map((result) => ({
+      student: userPublic(db.prepare('SELECT * FROM users WHERE id = ?').get(result.student_id)),
+      result: resultPublic(result),
+    })).filter((row) => row.student);
+  } else {
+    rows = ids.map((stId) => {
+      const student = db.prepare('SELECT * FROM users WHERE id = ?').get(stId);
+      if (!student) return null;
+      const result = db.prepare('SELECT * FROM exam_results WHERE exam_id = ? AND student_id = ?').get(exam.id, stId);
+      return { student: userPublic(student), result: result ? resultPublic(result) : null };
+    }).filter(Boolean);
+  }
+  const questions = loadQuestions(safeJson(exam.question_ids, []), false);
   const questionStats = questions.map((q) => {
-    let answered = 0, rights = 0;
-    for (const r of rows) {
-      if (!r.result) continue;
-      const ans = r.result.answers[q.id];
-      if (ans !== undefined) {
+    let answered = 0;
+    let rights = 0;
+    for (const row of rows) {
+      if (!row.result) continue;
+      const ans = row.result.answers[q.id];
+      if (ans !== undefined && ans !== null) {
         answered++;
         if (ans === q.answer) rights++;
       }
@@ -693,168 +885,185 @@ app.get('/api/exams/:id/results', authRequired, (req, res) => {
     return {
       questionId: q.id,
       text: q.text,
-      topicId: q.topic_id,
+      topicId: q.topicId,
       answered,
       correctRate: answered ? Math.round((rights / answered) * 100) : null,
     };
   });
-
   res.json({
-    exam: { ...exam, questions, topicIds: JSON.parse(exam.topic_ids) },
+    exam: {
+      id: exam.id,
+      title: exam.title,
+      topicIds: safeJson(exam.topic_ids, []),
+      deadline: exam.deadline,
+      durationMin: exam.duration_min,
+      questions,
+    },
     rows,
     questionStats,
   });
 });
 
-// ── Progress & Study ──
+// ── Progress ──
 app.get('/api/students/:id/progress', authRequired, (req, res) => {
-  const studentId = req.params.id === 'me' ? req.user.id : req.params.id;
+  const student = loadStudent(req, res, req.params.id);
+  if (!student) return;
   const now = new Date();
   const days = [...Array(14)].map((_, i) => {
-    const d = new Date(now);
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     d.setDate(d.getDate() - (13 - i));
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return isoDate(d);
   });
-
-  const sessions = db.prepare('SELECT * FROM study_sessions WHERE student_id = ?').all(studentId);
+  const sessions = db.prepare('SELECT * FROM study_sessions WHERE student_id = ?').all(student.id);
   const studyByDay = days.map((d) => ({
     date: d,
     minutes: sessions.filter((s) => s.date === d).reduce((a, s) => a + s.minutes, 0),
   }));
-
+  const last7 = new Set(days.slice(7));
   const bySubject = SUBJECTS.map((s) => ({
     subjectId: s.id,
-    minutes: sessions.filter((x) => x.subject_id === s.id).reduce((a, x) => a + x.minutes, 0),
+    minutes: sessions.filter((x) => x.subject_id === s.id && last7.has(x.date)).reduce((a, x) => a + x.minutes, 0),
   })).filter((x) => x.minutes > 0);
-
-  const tasks = db.prepare('SELECT * FROM tasks WHERE student_id = ?').all(studentId);
-  const results = db.prepare('SELECT * FROM exam_results WHERE student_id = ?').all(studentId);
-  const avgScore = results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null;
-
+  const { start, end } = weekBounds();
+  const tasks = db.prepare('SELECT done FROM tasks WHERE student_id = ? AND date >= ? AND date <= ?').all(student.id, start, end);
+  const results = db.prepare('SELECT * FROM exam_results WHERE student_id = ? ORDER BY finished_at ASC').all(student.id);
+  let streak = 0;
+  for (let i = studyByDay.length - 1; i >= 0; i--) {
+    if (studyByDay[i].minutes > 0) streak++;
+    else if (i === studyByDay.length - 1) continue;
+    else break;
+  }
   const topicsMap = {};
   for (const r of results) {
-    const bt = JSON.parse(r.by_topic);
-    for (const t of bt) {
+    for (const t of safeJson(r.by_topic, [])) {
       const cur = (topicsMap[t.topicId] ||= { topicId: t.topicId, correct: 0, total: 0 });
-      cur.correct += t.correct;
-      cur.total += t.total;
+      cur.correct += t.correct || 0;
+      cur.total += t.total || 0;
     }
   }
-
-  const topicAcc = Object.values(topicsMap).map((t) => ({
-    ...t,
+  const topics = Object.values(topicsMap).map((t) => ({
+    topicId: t.topicId,
+    name: TOPICS.names[t.topicId] || t.topicId,
+    subjectId: TOPICS.subjectOf[t.topicId] || null,
+    correct: t.correct,
+    total: t.total,
     accuracy: t.total ? Math.round((t.correct / t.total) * 100) : 0,
-    name: t.topicId,
-  }));
-
+  })).sort((a, b) => a.accuracy - b.accuracy);
+  const examRows = results.map((r) => {
+    const exam = db.prepare('SELECT title FROM exams WHERE id = ?').get(r.exam_id);
+    return { examId: r.exam_id, title: exam?.title || 'آزمون', score: r.percent, date: r.finished_at };
+  });
   res.json({
     weekMinutes: studyByDay.slice(7).reduce((a, d) => a + d.minutes, 0),
     weekDone: tasks.filter((t) => t.done).length,
     weekTotal: tasks.length,
-    streak: 5,
-    avgScore,
+    streak,
+    avgScore: results.length ? Math.round(results.reduce((a, r) => a + r.percent, 0) / results.length) : null,
     studyByDay,
     bySubject,
-    examTrend: results.map((r, i) => ({ examId: r.exam_id, title: `آزمون ${i + 1}`, score: r.percent, date: r.finished_at })),
-    topics: topicAcc,
+    examTrend: examRows,
+    topics,
   });
 });
 
 app.get('/api/study-sessions', authRequired, (req, res) => {
-  const sessions = db.prepare('SELECT * FROM study_sessions WHERE student_id = ? ORDER BY date DESC LIMIT 10').all(req.user.id);
-  res.json(sessions.map((s) => ({ ...s, subjectId: s.subject_id })));
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
+  const sessions = db.prepare('SELECT * FROM study_sessions WHERE student_id = ? ORDER BY date DESC LIMIT ?').all(req.user.id, limit);
+  res.json(sessions.map((s) => ({ ...s, subjectId: s.subject_id, studentId: s.student_id, taskId: s.task_id })));
 });
 
-app.post('/api/study-sessions', authRequired, (req, res) => {
-  const { subjectId, minutes, taskId } = req.body;
-  const today = new Date().toISOString().slice(0, 10);
+app.post('/api/study-sessions', authRequired, requireRole('student'), (req, res) => {
+  const minutes = Math.min(600, Math.max(1, Number(req.body?.minutes) || 0));
+  const subjectId = req.body?.subjectId;
+  if (!subjectId || !minutes) return res.status(400).json({ message: 'درس و مدت مطالعه الزامی است.' });
+  const taskId = req.body?.taskId || null;
+  if (taskId) {
+    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+    if (!task || task.student_id !== req.user.id) return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+    db.prepare('UPDATE tasks SET done = 1 WHERE id = ?').run(task.id);
+  }
   db.prepare(`
     INSERT INTO study_sessions (id, student_id, date, subject_id, minutes, task_id, auto)
     VALUES (?, ?, ?, ?, ?, ?, 0)
-  `).run(uid('ss'), req.user.id, today, subjectId, Number(minutes), taskId || null);
-
-  if (taskId) {
-    db.prepare('UPDATE tasks SET done = 1 WHERE id = ?').run(taskId);
-  }
-
+  `).run(uid('ss'), req.user.id, isoDate(), subjectId, minutes, taskId);
   res.json({ ok: true });
 });
 
 // ── Practice ──
 app.get('/api/practice', authRequired, (req, res) => {
-  const isCounselor = req.user.role === 'counselor';
-  const studentId = req.query.studentId;
-
-  let sql = 'SELECT * FROM practice';
-  const args = [];
-  if (!isCounselor) {
-    sql += ' WHERE student_id = ?';
-    args.push(req.user.id);
-  } else if (studentId) {
-    sql += ' WHERE student_id = ?';
-    args.push(studentId);
+  let rows;
+  if (req.user.role === 'student') {
+    rows = db.prepare('SELECT * FROM practice WHERE student_id = ? ORDER BY created_at DESC').all(req.user.id);
+  } else if (req.user.role === 'counselor') {
+    if (req.query.studentId) {
+      if (!ownsStudent(req.user, req.query.studentId)) return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+      rows = db.prepare('SELECT * FROM practice WHERE student_id = ? ORDER BY created_at DESC').all(req.query.studentId);
+    } else {
+      rows = db.prepare(`
+        SELECT p.* FROM practice p
+        JOIN users u ON u.id = p.student_id
+        WHERE u.counselor_id = ?
+        ORDER BY p.created_at DESC
+      `).all(req.user.id);
+    }
+  } else if (req.user.role === 'admin') {
+    rows = db.prepare('SELECT * FROM practice ORDER BY created_at DESC').all();
+  } else {
+    return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
   }
-  sql += ' ORDER BY created_at DESC';
-
-  const list = db.prepare(sql).all(...args);
-  const out = list.map((p) => {
-    const student = db.prepare('SELECT id, name, field, color FROM users WHERE id = ?').get(p.student_id);
-    return {
-      id: p.id,
-      title: p.title,
-      topicId: p.topic_id,
-      note: p.note,
-      image: p.image,
-      createdAt: p.created_at,
-      status: p.status,
-      feedback: p.feedback,
-      score: p.score,
-      student,
-    };
-  });
-  res.json(out);
+  res.json(rows.map((p) => ({
+    id: p.id,
+    title: p.title,
+    topicId: p.topic_id,
+    note: p.note,
+    image: p.image,
+    createdAt: p.created_at,
+    status: p.status,
+    feedback: p.feedback,
+    score: p.score,
+    student: userPublic(db.prepare('SELECT * FROM users WHERE id = ?').get(p.student_id)),
+  })));
 });
 
-app.post('/api/practice', authRequired, (req, res) => {
-  const { title, topicId, note, image } = req.body;
+app.post('/api/practice', authRequired, requireRole('student'), (req, res) => {
+  const { title, topicId, note, image } = req.body || {};
+  if (!title || !topicId) return res.status(400).json({ message: 'عنوان و مبحث کار عملی الزامی است.' });
+  const saved = saveBase64Image(image, 'practice');
+  if (saved.error) return res.status(400).json({ message: saved.error });
   const id = uid('p');
-  const today = new Date().toISOString().slice(0, 10);
-  const savedImage = saveBase64Image(image, 'practice');
+  const today = isoDate();
   db.prepare(`
     INSERT INTO practice (id, student_id, title, topic_id, note, image, created_at, status, feedback, score)
     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', null, null)
-  `).run(id, req.user.id, title, topicId, note || '', savedImage, today);
-
-  // Notify counselor
+  `).run(id, req.user.id, String(title).slice(0, 120), topicId, note || '', saved.url, today);
   if (req.user.counselor_id) {
     db.prepare(`
       INSERT INTO notifications (id, user_id, text, date, read, link)
       VALUES (?, ?, ?, ?, 0, '/c/practice')
     `).run(uid('n'), req.user.counselor_id, `${req.user.name} یک کار عملی جدید ارسال کرد.`, today);
   }
-
   res.json({ id });
 });
 
-app.post('/api/practice/:id/review', authRequired, (req, res) => {
-  const { feedback, score } = req.body;
-  const p = db.prepare('SELECT * FROM practice WHERE id = ?').get(req.params.id);
-  if (!p) return res.status(404).json({ message: 'کار عملی پیدا نشد.' });
-
-  db.prepare(`
-    UPDATE practice SET status = 'reviewed', feedback = ?, score = ? WHERE id = ?
-  `).run(feedback, score !== '' ? Number(score) : null, req.params.id);
-
-  // Notify student
+app.post('/api/practice/:id/review', authRequired, requireRole('counselor', 'admin'), (req, res) => {
+  const item = db.prepare('SELECT * FROM practice WHERE id = ?').get(req.params.id);
+  if (!item) return res.status(404).json({ message: 'کار عملی پیدا نشد.' });
+  const student = studentById(item.student_id);
+  if (req.user.role === 'counselor' && student?.counselor_id !== req.user.id) {
+    return res.status(403).json({ message: 'به این بخش دسترسی ندارید.' });
+  }
+  const score = req.body?.score === '' || req.body?.score == null ? null : Number(req.body.score);
+  if (score !== null && (!Number.isFinite(score) || score < 0 || score > 20)) {
+    return res.status(400).json({ message: 'نمره باید بین ۰ و ۲۰ باشد.' });
+  }
+  db.prepare(`UPDATE practice SET status = 'reviewed', feedback = ?, score = ? WHERE id = ?`).run(req.body?.feedback || '', score, item.id);
   db.prepare(`
     INSERT INTO notifications (id, user_id, text, date, read, link)
     VALUES (?, ?, 'مشاور برای کار عملی شما بازخورد ثبت کرد.', ?, 0, '/s/practice')
-  `).run(uid('n'), p.student_id, new Date().toISOString().slice(0, 10));
-
+  `).run(uid('n'), item.student_id, isoDate());
   res.json({ ok: true });
 });
 
-// ── Notifications ──
 app.get('/api/notifications', authRequired, (req, res) => {
   const list = db.prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY date DESC LIMIT 20').all(req.user.id);
   res.json(list.map((n) => ({ ...n, read: Boolean(n.read) })));
@@ -865,57 +1074,52 @@ app.post('/api/notifications/read', authRequired, (req, res) => {
   res.json({ ok: true });
 });
 
-// ── AI Assistant ──
 app.post('/api/ai/chat', authRequired, async (req, res) => {
-  const { message, history } = req.body;
-  if (!message?.trim()) {
-    return res.status(400).json({ message: 'پیام خالی ارسال شده است.' });
+  if (hitLimit(`aichat:${req.user.id}`, 30, 60 * 60 * 1000)) {
+    return res.status(429).json({ message: 'تعداد پرسش از دستیار زیاد است. کمی بعد دوباره تلاش کنید.' });
   }
-  const reply = await askGeminiChat(message.trim(), history || [], req.user);
-  res.json({ text: reply, reply: reply });
+  const message = String(req.body?.message || '').trim().slice(0, 2000);
+  if (!message) return res.status(400).json({ message: 'پیام خالی ارسال شده است.' });
+  try {
+    const history = Array.isArray(req.body?.history) ? req.body.history.slice(-6) : [];
+    const reply = await askGeminiChat(message, history, { name: req.user.name });
+    res.json({ text: reply, reply });
+  } catch {
+    res.status(500).json({ message: 'دستیار الان پاسخ نداد. دوباره تلاش کنید.' });
+  }
 });
 
-// ── Online Chat ──
-app.get('/api/chat/threads', authRequired, (req, res) => {
-  const counselorId = req.user.id;
-  const students = db.prepare("SELECT id, name, field, color FROM users WHERE role = 'student' AND counselor_id = ?").all(counselorId);
-
+// ── Chat ──
+app.get('/api/chat/threads', authRequired, requireRole('counselor'), (req, res) => {
+  const students = db.prepare("SELECT * FROM users WHERE role = 'student' AND counselor_id = ?").all(req.user.id);
   const threads = students.map((s) => {
     const lastMsg = db.prepare(`
       SELECT * FROM chat_messages
       WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
       ORDER BY created_at DESC LIMIT 1
-    `).get(counselorId, s.id, s.id, counselorId);
-
+    `).get(req.user.id, s.id, s.id, req.user.id);
     const unreadRow = db.prepare(`
-      SELECT COUNT(*) as c FROM chat_messages
-      WHERE sender_id = ? AND receiver_id = ? AND read = 0
-    `).get(s.id, counselorId);
-
+      SELECT COUNT(*) as c FROM chat_messages WHERE sender_id = ? AND receiver_id = ? AND read = 0
+    `).get(s.id, req.user.id);
     return {
-      student: s,
+      student: userPublic(s),
       lastMessage: lastMsg ? { id: lastMsg.id, text: lastMsg.text, createdAt: lastMsg.created_at } : null,
       unreadCount: unreadRow?.c || 0,
     };
   });
-
   res.json(threads);
 });
 
 app.get('/api/chat/messages', authRequired, (req, res) => {
-  const currentUserId = req.user.id;
-  const withUserId = req.query.withUserId;
-  if (!withUserId) return res.json([]);
-
+  const other = db.prepare('SELECT * FROM users WHERE id = ?').get(req.query.withUserId);
+  if (!other) return res.json([]);
+  if (!canChatPair(req.user, other)) return res.status(403).json({ message: 'به این گفتگو دسترسی ندارید.' });
   const messages = db.prepare(`
     SELECT * FROM chat_messages
     WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
     ORDER BY created_at ASC
-  `).all(currentUserId, withUserId, withUserId, currentUserId);
-
-  // Mark messages from other user as read
-  db.prepare('UPDATE chat_messages SET read = 1 WHERE sender_id = ? AND receiver_id = ?').run(withUserId, currentUserId);
-
+  `).all(req.user.id, other.id, other.id, req.user.id);
+  db.prepare('UPDATE chat_messages SET read = 1 WHERE sender_id = ? AND receiver_id = ?').run(other.id, req.user.id);
   res.json(messages.map((m) => ({
     id: m.id,
     senderId: m.sender_id,
@@ -927,159 +1131,128 @@ app.get('/api/chat/messages', authRequired, (req, res) => {
 });
 
 app.post('/api/chat/messages', authRequired, (req, res) => {
-  const { toUserId, text } = req.body;
-  if (!text?.trim()) return res.status(400).json({ message: 'متن پیام خالی است.' });
-
+  const text = String(req.body?.text || '').trim().slice(0, 2000);
+  if (!text) return res.status(400).json({ message: 'متن پیام خالی است.' });
+  const other = db.prepare('SELECT * FROM users WHERE id = ?').get(req.body?.toUserId);
+  if (!other || !canChatPair(req.user, other)) return res.status(403).json({ message: 'به این گفتگو دسترسی ندارید.' });
   const id = uid('m');
   const createdAt = new Date().toISOString();
   db.prepare(`
     INSERT INTO chat_messages (id, sender_id, receiver_id, text, created_at, read)
     VALUES (?, ?, ?, ?, ?, 0)
-  `).run(id, req.user.id, toUserId, text.trim(), createdAt);
-
-  // Send notification to receiver
+  `).run(id, req.user.id, other.id, text, createdAt);
   db.prepare(`
     INSERT INTO notifications (id, user_id, text, date, read, link)
     VALUES (?, ?, ?, ?, 0, ?)
   `).run(
     uid('n'),
-    toUserId,
+    other.id,
     `پیام جدید از طرف ${req.user.name}`,
     createdAt.slice(0, 10),
-    req.user.role === 'counselor' ? '/s/chat' : `/c/chat?student=${req.user.id}`
+    req.user.role === 'counselor' ? '/s/chat' : `/c/chat?student=${req.user.id}`,
   );
-
-  res.json({ id, senderId: req.user.id, receiverId: toUserId, text: text.trim(), createdAt, read: false });
+  res.json({ id, senderId: req.user.id, receiverId: other.id, text, createdAt, read: false });
 });
 
 // ── Admin ──
-app.get('/api/admin/stats', authRequired, (req, res) => {
+app.get('/api/admin/stats', authRequired, requireRole('admin'), (req, res) => {
   const counselors = db.prepare("SELECT * FROM users WHERE role = 'counselor'").all();
-  const students = db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'student'").get().c;
-  const exams = db.prepare('SELECT COUNT(*) as c FROM exams').get().c;
-  const activeCounselors = counselors.filter((c) => c.status === 'active').length;
-
   let monthlyRevenue = 0;
   for (const c of counselors) {
-    const p = PLANS.find((x) => x.id === c.plan);
-    if (p && p.price) monthlyRevenue += p.price;
+    if (c.status !== 'active') continue;
+    const plan = PLANS.find((x) => x.id === c.plan);
+    if (plan?.price) monthlyRevenue += plan.price;
   }
-
   res.json({
     counselors: counselors.length,
-    activeCounselors,
-    students,
-    exams,
+    activeCounselors: counselors.filter((c) => c.status === 'active').length,
+    students: db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'student'").get().c,
+    exams: db.prepare('SELECT COUNT(*) as c FROM exams').get().c,
     monthlyRevenue,
     questions: db.prepare('SELECT COUNT(*) as c FROM questions').get().c,
   });
 });
 
-app.get('/api/admin/settings/sms', authRequired, (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ message: 'دسترسی فقط برای مدیر سامانه مجاز است.' });
-  const cfg = getSmsConfig();
+app.get('/api/admin/settings/sms', authRequired, requireRole('admin'), (req, res) => {
+  const rowKey = db.prepare("SELECT value FROM settings WHERE key = 'sms_api_key'").get();
+  const rowTpl = db.prepare("SELECT value FROM settings WHERE key = 'sms_template_id'").get();
+  const apiKey = rowKey?.value || process.env.SMS_IR_API_KEY || '';
   res.json({
-    apiKeyMasked: cfg.apiKey ? `${cfg.apiKey.slice(0, 6)}...${cfg.apiKey.slice(-4)}` : '',
-    hasApiKey: Boolean(cfg.apiKey),
-    templateId: cfg.templateId || '',
+    apiKeyMasked: apiKey ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : '',
+    hasApiKey: Boolean(apiKey),
+    templateId: rowTpl?.value || process.env.SMS_IR_TEMPLATE_ID || '',
   });
 });
 
-app.post('/api/admin/settings/sms', authRequired, (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ message: 'دسترسی فقط برای مدیر سامانه مجاز است.' });
-  const { apiKey, templateId } = req.body;
-  if (apiKey) {
-    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sms_api_key', ?)").run(apiKey.trim());
-  }
+app.post('/api/admin/settings/sms', authRequired, requireRole('admin'), (req, res) => {
+  const { apiKey, templateId } = req.body || {};
+  if (apiKey) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sms_api_key', ?)").run(String(apiKey).trim());
   if (templateId !== undefined) {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sms_template_id', ?)").run(String(templateId).trim());
   }
   res.json({ ok: true, message: 'تنظیمات پیامک با موفقیت ذخیره شد.' });
 });
 
-app.get('/api/admin/counselors', authRequired, (req, res) => {
+app.get('/api/admin/counselors', authRequired, requireRole('admin'), (req, res) => {
   const list = db.prepare("SELECT * FROM users WHERE role = 'counselor'").all();
-  const out = list.map((c) => {
-    const studentCount = db.prepare('SELECT COUNT(*) as c FROM users WHERE counselor_id = ?').get(c.id).c;
-    const examCount = db.prepare('SELECT COUNT(*) as c FROM exams WHERE created_by = ?').get(c.id).c;
-    return {
-      ...c,
-      renewAt: c.renew_at,
-      studentCount,
-      examCount,
-    };
-  });
-  res.json(out);
+  res.json(list.map((c) => ({
+    ...userPublic(c),
+    studentCount: db.prepare("SELECT COUNT(*) as c FROM users WHERE counselor_id = ? AND role = 'student'").get(c.id).c,
+    examCount: db.prepare('SELECT COUNT(*) as c FROM exams WHERE created_by = ?').get(c.id).c,
+  })));
 });
 
-app.post('/api/admin/counselors', authRequired, (req, res) => {
-  const { name, phone, plan } = req.body;
+app.post('/api/admin/counselors', authRequired, requireRole('admin'), (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const phone = normalizePhone(req.body?.phone);
+  if (!name || !/^09\d{9}$/.test(phone)) return res.status(400).json({ message: 'نام و شماره موبایل معتبر الزامی است.' });
+  if (db.prepare('SELECT id FROM users WHERE phone = ?').get(phone)) return res.status(400).json({ message: 'این شماره قبلاً ثبت شده است.' });
+  const plan = PLANS.some((p) => p.id === req.body?.plan) ? req.body.plan : 'trial';
   const id = uid('c');
   db.prepare(`
     INSERT INTO users (id, role, name, phone, field, color, counselor_id, plan, status, renew_at, speciality)
     VALUES (?, 'counselor', ?, ?, null, '#e5446d', null, ?, 'active', ?, 'مشاور کنکور هنر')
-  `).run(id, name, phone, plan || 'trial', new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
-  res.json(db.prepare('SELECT * FROM users WHERE id = ?').get(id));
+  `).run(id, name.slice(0, 80), phone, plan, isoDate(new Date(Date.now() + 30 * 86400000)));
+  res.json(userPublic(db.prepare('SELECT * FROM users WHERE id = ?').get(id)));
 });
 
-app.patch('/api/admin/counselors/:id', authRequired, (req, res) => {
-  const { status, plan } = req.body;
-  if (status) db.prepare('UPDATE users SET status = ? WHERE id = ?').run(status, req.params.id);
-  if (plan) db.prepare('UPDATE users SET plan = ? WHERE id = ?').run(plan, req.params.id);
-  res.json(db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id));
+app.patch('/api/admin/counselors/:id', authRequired, requireRole('admin'), (req, res) => {
+  const counselor = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'counselor'").get(req.params.id);
+  if (!counselor) return res.status(404).json({ message: 'مشاور پیدا نشد.' });
+  const { status, plan } = req.body || {};
+  if (status && !['active', 'suspended'].includes(status)) return res.status(400).json({ message: 'وضعیت نامعتبر است.' });
+  if (plan && !PLANS.some((p) => p.id === plan)) return res.status(400).json({ message: 'پلن نامعتبر است.' });
+  if (status) db.prepare('UPDATE users SET status = ? WHERE id = ?').run(status, counselor.id);
+  if (plan) db.prepare('UPDATE users SET plan = ? WHERE id = ?').run(plan, counselor.id);
+  if (status === 'suspended') db.prepare('DELETE FROM tokens WHERE user_id = ?').run(counselor.id);
+  res.json(userPublic(db.prepare('SELECT * FROM users WHERE id = ?').get(counselor.id)));
 });
-
-// Serve frontend build directly on port 8000
-import fs from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const staticDir = resolve(__dirname, '../naghshyar-demo-build');
-const uploadsDir = resolve(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-export function saveBase64Image(dataUri, prefix = 'img') {
-  if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:image/')) return dataUri;
-  try {
-    const matches = dataUri.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
-    if (!matches) return dataUri;
-    const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
-    const buffer = Buffer.from(matches[2], 'base64');
-    const filename = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}.${ext}`;
-    const filePath = resolve(uploadsDir, filename);
-    fs.writeFileSync(filePath, buffer);
-    return `/uploads/${filename}`;
-  } catch (err) {
-    console.error('Error saving image to disk:', err);
-    return dataUri;
-  }
-}
 
 app.use('/uploads', express.static(uploadsDir, { maxAge: '30d' }));
 app.use(express.static(staticDir, {
-  setHeaders: (res, path) => {
-    if (path.includes('/assets/')) {
+  setHeaders: (res, filePath) => {
+    if (filePath.includes('/assets/') || filePath.includes('\\assets\\')) {
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
-  }
+  },
 }));
-app.use((req, res, next) => {
-  if (req.path.includes('/assets/')) {
-    const assetSub = req.path.substring(req.path.indexOf('/assets/'));
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    return res.sendFile(resolve(staticDir, '.' + assetSub));
-  }
-  next();
-});
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(resolve(staticDir, 'index.html'));
 });
 
-const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => {
-  console.log(`Backend server running at http://localhost:${PORT}`);
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ message: 'خطای داخلی سرور.' });
 });
+
+const PORT = process.env.PORT || 8000;
+if (!process.env.NAGHSHYAR_NO_LISTEN) {
+  app.listen(PORT, () => {
+    console.log(`Backend server running at http://localhost:${PORT}`);
+  });
+}
+
+export { app };

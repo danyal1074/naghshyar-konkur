@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import api from '../api';
-import { USE_MOCK, DEMO_OTP, APP_TAGLINE } from '../config';
+import { USE_MOCK, APP_TAGLINE } from '../config';
 import { ROLE_LABEL, homeFor, useAuth } from '../auth';
 import { Brand } from '../Shell';
 import { Button, Field, Icon, Seg } from '../ui';
@@ -133,7 +133,7 @@ export default function Login() {
               <p className="muted">
                 کد ۵ رقمی ارسال‌شده به شماره‌ی <b className="ltr-inline">{phone}</b> را وارد کنید.
               </p>
-              <Field label="کد تأیید" error={err} hint="کد ۵ رقمی پیامک‌شده را وارد کنید (کد تستی سریع: ۱۲۳۴۵)">
+              <Field label="کد تأیید" error={err} hint={USE_MOCK ? 'در حالت نمایشی کد همیشه ۱۲۳۴۵ است.' : 'کد ۵ رقمی پیامک‌شده را وارد کنید.'}>
                 <input
                   className="input ltr otp"
                   inputMode="numeric"
@@ -172,16 +172,20 @@ export default function Login() {
                 />
               </Field>
 
-              <Field label="نوع حساب کاربری">
-                <Seg
-                  value={profile.role}
-                  onChange={(r) => setProfile({ ...profile, role: r })}
-                  options={[
-                    { value: 'student', label: 'داوطلب کنکور هنر (مستقل / آزاد)' },
-                    { value: 'counselor', label: 'مشاور کنکور هنر' },
-                  ]}
-                />
-              </Field>
+              {USE_MOCK ? (
+                <Field label="نوع حساب کاربری">
+                  <Seg
+                    value={profile.role}
+                    onChange={(r) => setProfile({ ...profile, role: r })}
+                    options={[
+                      { value: 'student', label: 'داوطلب کنکور هنر (مستقل / آزاد)' },
+                      { value: 'counselor', label: 'مشاور کنکور هنر' },
+                    ]}
+                  />
+                </Field>
+              ) : (
+                <p className="muted sm">حساب جدید به‌عنوان داوطلب ساخته می‌شود. مشاور را مدیر سامانه اضافه می‌کند.</p>
+              )}
 
               {profile.role === 'student' && (
                 <Field label="رشته‌ی هدف در کنکور هنر">
@@ -205,7 +209,7 @@ export default function Login() {
             </form>
           )}
 
-          <div className="demo-box">
+          {USE_MOCK && <div className="demo-box">
             <h3>ورود سریع با حساب‌های نمونه</h3>
             <div className="stack-sm">
               {['student', 'counselor', 'admin'].map((r) => (
@@ -217,7 +221,7 @@ export default function Login() {
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
         </div>
       </main>
     </div>
