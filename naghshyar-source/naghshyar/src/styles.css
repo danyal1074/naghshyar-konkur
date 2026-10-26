@@ -513,6 +513,12 @@ button.list-row:hover, a.list-row:hover { border-color: var(--lapis); }
 @keyframes pulse-badge { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,.3); } 50% { box-shadow: 0 0 0 8px rgba(255,255,255,0); } }
 
 .hero-ctas { display: flex; gap: 12px; flex-wrap: wrap; }
+.hero-demo-quick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: -4px; z-index: 2; }
+.hero-demo-quick-lbl { font-size: .84rem; opacity: .88; color: #fff; font-weight: 500; }
+.hero-quick-pill { background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); color: #fff; padding: 5px 14px; border-radius: 99px; font-size: .84rem; font-weight: 600; cursor: pointer; transition: all .18s ease; backdrop-filter: blur(4px); }
+.hero-quick-pill:hover:not(:disabled) { background: #fff; color: var(--lapis); border-color: #fff; transform: translateY(-1px); }
+.hero-quick-pill:disabled { opacity: .6; cursor: wait; }
+#demo, #features, #plans, #faq, #roles { scroll-margin-top: 80px; }
 
 /* Floating particles */
 .hero-particles { position: absolute; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }

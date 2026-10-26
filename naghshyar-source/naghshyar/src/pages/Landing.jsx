@@ -61,23 +61,49 @@ function FaqItem({ q, a }) {
 
 /* ═══════════════ Landing Page ═══════════════ */
 
-export default function Landing() {
+export default function Landing({ defaultSection }) {
   const nav = useNavigate();
   const { user, setUser } = useAuth();
   const { data: plans } = useAsync(() => api.listPlans(), []);
   const { data: statsData } = useAsync(() => api.getPublicStats().catch(() => null), []);
   const [demoLoading, setDemoLoading] = useState('');
+  const [demoErr, setDemoErr] = useState('');
+
+  const scrollTo = (id) => (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const el = document.getElementById(id);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
+  useEffect(() => {
+    const sec = defaultSection || (window.location.hash.includes('demo') ? 'demo' : null);
+    if (sec) {
+      setTimeout(() => {
+        const el = document.getElementById(sec);
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
+      }, 150);
+    }
+  }, [defaultSection]);
 
   const enterDemo = async (role) => {
     setDemoLoading(role);
+    setDemoErr('');
     try {
       const r = await api.demoLogin(role);
       if (r?.user) {
         setUser(r.user);
         nav(homeFor(r.user.role));
+      } else {
+        throw new Error('خطا در دریافت اطلاعات کاربری دمو.');
       }
     } catch (e) {
-      console.error(e);
+      console.error('Demo login error:', e);
+      setDemoErr(e.message || 'خطا در ورود به حالت دمو. لطفاً دوباره تلاش کنید.');
     }
     setDemoLoading('');
   };
@@ -90,17 +116,17 @@ export default function Landing() {
       <header className="land-top">
         <Brand />
         <nav className="land-nav">
-          <a href="#demo" className="land-nav-link land-nav-demo">🎮 تست دموی سامانه</a>
-          <a href="#features" className="land-nav-link">امکانات</a>
-          <a href="#plans" className="land-nav-link">اشتراک</a>
-          <a href="#faq" className="land-nav-link">سؤالات متداول</a>
+          <a href="#demo" onClick={scrollTo('demo')} className="land-nav-link land-nav-demo">🎮 تست دموی سامانه</a>
+          <a href="#features" onClick={scrollTo('features')} className="land-nav-link">امکانات</a>
+          <a href="#plans" onClick={scrollTo('plans')} className="land-nav-link">اشتراک</a>
+          <a href="#faq" onClick={scrollTo('faq')} className="land-nav-link">سؤالات متداول</a>
         </nav>
         <div className="grow" />
         {user ? (
           <Button variant="soft" onClick={() => nav(homeFor(user.role))}>ورود به پنل</Button>
         ) : (
           <div className="row" style={{ gap: '8px' }}>
-            <a href="#demo" className="btn btn-soft btn-sm" style={{ fontWeight: 700 }}>تست دمو</a>
+            <button type="button" onClick={scrollTo('demo')} className="btn btn-soft btn-sm" style={{ fontWeight: 700 }}>تست دمو</button>
             <Link to="/login" className="btn btn-primary">ورود / ثبت‌نام</Link>
           </div>
         )}
@@ -122,11 +148,42 @@ export default function Landing() {
             مشاور برنامه می‌نویسد، دانش‌آموز تیک می‌زند، آزمون همان بخش خودکار ساخته می‌شود و ضعف‌ها پیش از روز کنکور پیدا می‌شوند.
           </p>
           <div className="hero-ctas">
-            <a href="#demo" className="btn btn-light btn-lg">
+            <button
+              type="button"
+              onClick={scrollTo('demo')}
+              className="btn btn-light btn-lg hero-demo-main-btn"
+            >
               <Icon name="eye" size={20} />
               تست دموی سامانه (بدون ثبت‌نام)
-            </a>
-            <Link to="/login" className="btn btn-outline-light btn-lg">ورود با شماره موبایل</Link>
+            </button>
+            <Link to="/login" className="btn btn-outline-light btn-lg">ورود / ثبت‌نام</Link>
+          </div>
+          <div className="hero-demo-quick">
+            <span className="hero-demo-quick-lbl">یا ورود سریع آزمایشی:</span>
+            <button
+              type="button"
+              className="hero-quick-pill"
+              disabled={!!demoLoading}
+              onClick={() => enterDemo('student')}
+            >
+              {demoLoading === 'student' ? 'در حال ورود...' : 'دانش‌آموز هنر'}
+            </button>
+            <button
+              type="button"
+              className="hero-quick-pill"
+              disabled={!!demoLoading}
+              onClick={() => enterDemo('counselor')}
+            >
+              {demoLoading === 'counselor' ? 'در حال ورود...' : 'مشاور کنکور'}
+            </button>
+            <button
+              type="button"
+              className="hero-quick-pill"
+              disabled={!!demoLoading}
+              onClick={() => enterDemo('admin')}
+            >
+              {demoLoading === 'admin' ? 'در حال ورود...' : 'مدیر سامانه'}
+            </button>
           </div>
         </div>
 
@@ -210,6 +267,13 @@ export default function Landing() {
             </p>
           </div>
         </Reveal>
+
+        {demoErr && (
+          <div className="callout warn" style={{ maxWidth: 700, margin: '0 auto 20px', fontSize: '.9rem' }}>
+            <Icon name="warning" size={18} />
+            <span>{demoErr}</span>
+          </div>
+        )}
 
         <div className="demo-grid">
           <Reveal delay={50}>
@@ -465,18 +529,18 @@ export default function Landing() {
             <h4>دسترسی سریع</h4>
             <ul>
               <li><Link to="/login">ورود / ثبت‌نام</Link></li>
-              <li><a href="#features">امکانات سامانه</a></li>
-              <li><a href="#plans">پلن‌های اشتراک</a></li>
-              <li><a href="#faq">سؤالات متداول</a></li>
+              <li><a href="#features" onClick={scrollTo('features')}>امکانات سامانه</a></li>
+              <li><a href="#plans" onClick={scrollTo('plans')}>پلن‌های اشتراک</a></li>
+              <li><a href="#faq" onClick={scrollTo('faq')}>سؤالات متداول</a></li>
             </ul>
           </div>
           <div className="footer-col">
             <h4>درباره کنکور هنر</h4>
             <ul>
-              <li><a href="#roles">رشته‌ی گرافیک</a></li>
-              <li><a href="#roles">رشته‌ی نقاشی</a></li>
-              <li><a href="#roles">رشته‌ی سینما</a></li>
-              <li><a href="#roles">رشته‌ی صنایع دستی</a></li>
+              <li><a href="#roles" onClick={scrollTo('roles')}>رشته‌ی گرافیک</a></li>
+              <li><a href="#roles" onClick={scrollTo('roles')}>رشته‌ی نقاشی</a></li>
+              <li><a href="#roles" onClick={scrollTo('roles')}>رشته‌ی سینما</a></li>
+              <li><a href="#roles" onClick={scrollTo('roles')}>رشته‌ی صنایع دستی</a></li>
             </ul>
           </div>
           <div className="footer-col">

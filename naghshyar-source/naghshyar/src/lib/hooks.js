@@ -28,7 +28,7 @@ export function useSyllabus() {
     if (syllabusCache) return;
     api.getSyllabus().then((s) => { syllabusCache = s; setSubjects(s); });
   }, []);
-  const topics = subjects.flatMap((s) => s.topics.map((t) => ({ ...t, subjectId: s.id })));
+  const topics = subjects.flatMap((s) => (s.topics || []).map((t) => ({ ...t, subjectId: s.id })));
   return {
     ready: subjects.length > 0,
     subjects,

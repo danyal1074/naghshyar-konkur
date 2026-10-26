@@ -15,6 +15,10 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
+      <Route path="/demo" element={<Landing defaultSection="demo" />} />
+      <Route path="/features" element={<Landing defaultSection="features" />} />
+      <Route path="/plans" element={<Landing defaultSection="plans" />} />
+      <Route path="/faq" element={<Landing defaultSection="faq" />} />
       <Route path="/login" element={<Login />} />
 
       <Route path="/s" element={<RequireRole role="student"><Shell role="student" /></RequireRole>}>

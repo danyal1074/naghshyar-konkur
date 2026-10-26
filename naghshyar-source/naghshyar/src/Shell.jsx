@@ -145,7 +145,7 @@ export default function Shell({ role }) {
   const barItems = items.filter((i) => i.bar);
   const moreItems = items.filter((i) => !i.bar);
 
-  const isDemo = user && (user.phone?.startsWith('0912000') || ['s1', 'c1', 'admin'].includes(user.id));
+  const isDemo = user && (user.phone?.startsWith('0912000') || ['s1', 'c1', 'a1', 'admin'].includes(user.id));
   const switchTo = async (targetRole) => {
     try {
       const r = await api.demoLogin(targetRole);
